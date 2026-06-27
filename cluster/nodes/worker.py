@@ -171,7 +171,16 @@ class WorkerDaemon:
 
     def join(self, controller_address: str) -> bool:
         """Join a cluster by contacting the controller."""
+        from cluster.models.registry import discover_all_models
+
         self._controller_address = controller_address
+
+        # Discover models already pulled on this node
+        local_models = discover_all_models()
+        model_names = [m.name for m in local_models]
+        if model_names:
+            logger.info(f"Local models: {', '.join(model_names)}")
+
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                 s.settimeout(5.0)
@@ -180,6 +189,7 @@ class WorkerDaemon:
                     "node_id": self.node.node_id,
                     "hardware": self.node.to_dict()["hardware"],
                     "address": self._get_local_ip(),
+                    "models": model_names,
                 }).encode()
                 s.sendto(msg, (controller_address, self.config.controller_port))
 

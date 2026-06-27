@@ -150,6 +150,8 @@ class HeartbeatListener:
                     address=msg.get("address", addr[0]),
                     status=NodeStatus.IDLE,
                 )
+                # Attach discovered models to the node
+                node.models = msg.get("models", [])
                 self._monitor.register(node)
                 # Send acknowledgment
                 if self._socket:

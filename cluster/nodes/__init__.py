@@ -32,6 +32,7 @@ class Node:
     status: NodeStatus = NodeStatus.IDLE
     last_heartbeat: float = field(default_factory=time.time)
     address: Optional[str] = None  # IPv4 address on the local network
+    models: list[str] = field(default_factory=list)  # Models available on this node
 
     @property
     def is_available(self) -> bool:

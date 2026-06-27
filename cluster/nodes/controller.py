@@ -58,9 +58,11 @@ class ClusterController:
         # Callbacks for worker join/leave events (print to controller terminal)
         def on_join(node: Node) -> None:
             gpus_str = ", ".join(g.name for g in node.hardware.gpus) if node.hardware.gpus else "none"
+            models_str = ", ".join(node.models) if node.models else "none"
             print(f"[aggregatepc] + Worker joined: {node.node_id} ({node.hardware.hostname}) "
                   f"- CPU: {node.hardware.cpu.cores_logical}c, RAM: {node.hardware.memory.total_mb}MB, "
-                  f"GPU: {gpus_str} [score: {node.compute_score:.1f}]")
+                  f"GPU: {gpus_str} [score: {node.compute_score:.1f}] "
+                  f"Models: {models_str}")
 
         def on_leave(node: Node) -> None:
             print(f"[aggregatepc] - Worker left: {node.node_id} ({node.hardware.hostname})")

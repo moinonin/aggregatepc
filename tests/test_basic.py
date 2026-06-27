@@ -324,6 +324,30 @@ class TestConfig:
         assert len(config["worker_ips"]) >= 1
 
 
+class TestModelDiscovery:
+    def test_discover_returns_list(self):
+        from cluster.models.registry import discover_all_models
+        models = discover_all_models()
+        assert isinstance(models, list)
+
+    def test_model_info_has_required_fields(self):
+        from cluster.models.registry import discover_all_models
+        models = discover_all_models()
+        for model in models:
+            assert hasattr(model, "name")
+            assert hasattr(model, "path")
+            assert hasattr(model, "size_mb")
+            assert hasattr(model, "model_type")
+
+    def test_model_summary(self):
+        from cluster.models.registry import discover_all_models, get_model_summary
+        models = discover_all_models()
+        summary = get_model_summary(models)
+        assert "total_models" in summary
+        assert "total_size_mb" in summary
+        assert "by_type" in summary
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))
