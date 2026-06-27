@@ -166,15 +166,15 @@ class ClusterProxy:
             if status:
                 workers = status.get("workers", [])
                 for worker_info in workers:
-                    address = worker_info.get("address")
-                    if not address:
+                    address_candidates = _worker_backend_candidates(worker_info)
+                    if not address_candidates:
                         continue
 
                     # Get models advertised by this worker
                     worker_models = worker_info.get("models", [])
 
                     # Also check if worker's Ollama is reachable via API
-                    ollama_models = self._get_worker_ollama_models(address, ollama_port)
+                    backend_address, ollama_models = self._find_reachable_ollama(address_candidates, ollama_port)
                     backend_reachable = ollama_models is not None
 
                     # Combine: prefer explicitly advertised models, fall back to Ollama API
@@ -182,7 +182,10 @@ class ClusterProxy:
 
                     nodes.append({
                         "node_id": worker_info.get("node_id", worker_info.get("hostname", "unknown")),
-                        "address": address,
+                        "address": backend_address or address_candidates[0],
+                        "observed_address": worker_info.get("address"),
+                        "advertised_address": worker_info.get("advertised_address"),
+                        "candidate_addresses": address_candidates,
                         "models": all_models,
                         "advertised_models": worker_models,
                         "backend_models": ollama_models or [],
@@ -267,6 +270,14 @@ class ClusterProxy:
             logger.debug(f"Could not reach Ollama on {worker_address}:{ollama_port}: {e}")
             return None
 
+    def _find_reachable_ollama(self, addresses: list[str], ollama_port: int) -> tuple[Optional[str], Optional[list[str]]]:
+        """Return the first address where Ollama responds."""
+        for address in addresses:
+            models = self._get_worker_ollama_models(address, ollama_port)
+            if models is not None:
+                return address, models
+        return None, None
+
     def get_status(self) -> dict:
         """Get cluster model status."""
         with self._lock:
@@ -278,6 +289,9 @@ class ClusterProxy:
                     {
                         "node_id": node["node_id"],
                         "address": node["address"],
+                        "observed_address": node["observed_address"],
+                        "advertised_address": node["advertised_address"],
+                        "candidate_addresses": node["candidate_addresses"],
                         "reachable": node["backend_reachable"],
                         "advertised_models": node["advertised_models"],
                         "backend_models": node["backend_models"],
@@ -432,6 +446,24 @@ def _normalize_model_name(model_name: Optional[str]) -> Optional[str]:
     if not model_name:
         return None
     return model_name.replace("ollama://", "")
+
+
+def _worker_backend_candidates(worker_info: dict) -> list[str]:
+    """Return candidate IPs to try for a worker backend, in priority order."""
+    candidates = [
+        worker_info.get("backend_address"),
+        worker_info.get("ollama_host"),
+        worker_info.get("address"),
+        worker_info.get("advertised_address"),
+    ]
+    seen = set()
+    ordered = []
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        ordered.append(candidate)
+    return ordered
 
 
 def start_proxy():

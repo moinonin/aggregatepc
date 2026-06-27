@@ -618,6 +618,47 @@ class TestInferenceProxy:
             "on worker-1 (192.168.100.11:11434)"
         )
 
+    def test_cluster_discovery_tries_advertised_address_after_observed_address(self, monkeypatch):
+        import scripts.start_inference as inference
+
+        tried = []
+        proxy = inference.ClusterProxy()
+        monkeypatch.setattr(proxy, "_query_controller_status", lambda port: {
+            "workers": [{
+                "node_id": "nr-dell",
+                "address": "192.168.1.2",
+                "advertised_address": "192.168.100.31",
+                "models": ["qwen2.5-coder:7b"],
+            }]
+        })
+
+        def fake_ollama_models(address, port):
+            tried.append(address)
+            if address == "192.168.100.31":
+                return ["qwen2.5-coder:7b"]
+            return None
+
+        monkeypatch.setattr(proxy, "_get_worker_ollama_models", fake_ollama_models)
+
+        proxy.discover_cluster(8765, wait_seconds=0)
+        status = proxy.get_status()
+        target, model = proxy.select_target("qwen2.5-coder:7b")
+
+        assert tried == ["192.168.1.2", "192.168.100.31"]
+        assert target["address"] == "192.168.100.31"
+        assert model == "qwen2.5-coder:7b"
+        assert status["backends"][0]["observed_address"] == "192.168.1.2"
+        assert status["backends"][0]["advertised_address"] == "192.168.100.31"
+        assert status["backends"][0]["candidate_addresses"] == ["192.168.1.2", "192.168.100.31"]
+
+    def test_worker_backend_candidates_deduplicates_addresses(self):
+        import scripts.start_inference as inference
+
+        assert inference._worker_backend_candidates({
+            "address": "192.168.1.2",
+            "advertised_address": "192.168.1.2",
+        }) == ["192.168.1.2"]
+
     def test_select_target_uses_requested_model_node(self, monkeypatch):
         import scripts.start_inference as inference
 
