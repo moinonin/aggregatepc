@@ -50,11 +50,22 @@ class ClusterController:
 
     def __init__(self, port: int = 8765):
         self.port = port
-        self._heartbeat_listener = HeartbeatListener(port=port)
         self._local_node = self._build_controller_node()
         self._prune_interval = 15.0  # seconds
         self._last_prune = time.time()
         self._running = False
+
+        # Callbacks for worker join/leave events (print to controller terminal)
+        def on_join(node: Node) -> None:
+            gpus_str = ", ".join(g.name for g in node.hardware.gpus) if node.hardware.gpus else "none"
+            print(f"[aggregatepc] + Worker joined: {node.node_id} ({node.hardware.hostname}) "
+                  f"- CPU: {node.hardware.cpu.cores_logical}c, RAM: {node.hardware.memory.total_mb}MB, "
+                  f"GPU: {gpus_str} [score: {node.compute_score:.1f}]")
+
+        def on_leave(node: Node) -> None:
+            print(f"[aggregatepc] - Worker left: {node.node_id} ({node.hardware.hostname})")
+
+        self._heartbeat_listener = HeartbeatListener(port=port, on_join=on_join, on_leave=on_leave)
 
     def _build_controller_node(self) -> Node:
         """Create a Node representing this controller."""
@@ -129,8 +140,8 @@ class ClusterController:
 
         self._last_prune = now
         dead = self._heartbeat_listener.monitor.prune_dead()
-        if dead:
-            logger.info(f"Pruned {len(dead)} dead worker(s): {dead}")
+        for node_id in dead:
+            print(f"[aggregatepc] - Worker removed (timeout): {node_id}")
         return dead
 
     def run_forever(self) -> None:

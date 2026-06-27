@@ -48,25 +48,33 @@ class WorkerState:
 class HeartbeatMonitor:
     """Tracks worker health on the controller side."""
 
-    def __init__(self):
+    def __init__(self, on_join=None, on_leave=None):
         self._workers: dict[str, WorkerState] = {}
+        self._on_join = on_join
+        self._on_leave = on_leave
 
     def register(self, node: Node) -> bool:
         """Register a new worker. Returns True if accepted."""
-        if node.node_id in self._workers:
+        is_rejoin = node.node_id in self._workers
+        if is_rejoin:
             logger.warning(f"Worker {node.node_id} already registered, refreshing")
             self._workers[node.node_id].refresh()
             return True
 
         self._workers[node.node_id] = WorkerState(node=node)
         logger.info(f"Registered worker {node.node_id} ({node.hardware.hostname})")
+        if self._on_join:
+            self._on_join(node)
         return True
 
     def deregister(self, node_id: str) -> None:
         """Remove a worker from monitoring."""
         if node_id in self._workers:
+            node = self._workers[node_id].node
             del self._workers[node_id]
             logger.info(f"Deregistered worker {node_id}")
+            if self._on_leave:
+                self._on_leave(node)
 
     def record_heartbeat(self, node_id: str, status: str, compute_score: float) -> None:
         """Record an incoming heartbeat from a worker."""
@@ -117,9 +125,9 @@ class HeartbeatMonitor:
 class HeartbeatListener:
     """UDP listener that receives worker heartbeats on the controller."""
 
-    def __init__(self, port: int = 8765):
+    def __init__(self, port: int = 8765, on_join=None, on_leave=None):
         self.port = port
-        self._monitor = HeartbeatMonitor()
+        self._monitor = HeartbeatMonitor(on_join=on_join, on_leave=on_leave)
         self._running = False
         self._socket: Optional[socket.socket] = None
         self._listener_thread: Optional[object] = None

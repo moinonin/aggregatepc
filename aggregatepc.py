@@ -111,7 +111,8 @@ def cmd_status(args: argparse.Namespace) -> None:
 
     file_config = load_config(args.config)
     controller_addr = args.controller or file_config.get("controller_ip", "127.0.0.1")
-    port = args.port if args.port != 8765 else file_config.get("status_port", 8766)
+    # Status queries go to the controller's main port (8765), not a separate port
+    port = args.port if args.port != 8765 else file_config.get("controller_port", 8765)
 
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
