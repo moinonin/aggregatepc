@@ -27,8 +27,11 @@ from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import logging
 from cluster.models.registry import discover_all_models, get_best_model
 from cluster.config import load_config
+
+logger = logging.getLogger("aggregatepc.inference")
 
 
 def get_local_ip() -> str:
