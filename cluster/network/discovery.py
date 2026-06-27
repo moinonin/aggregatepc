@@ -53,26 +53,33 @@ class MDNSDiscovery:
 
     def _scan_zeroconf(self, timeout: float) -> list[DiscoveredPeer]:
         """Scan using the zeroconf library (preferred method)."""
-        from zeroconf import ServiceBrowser, Zeroconf, ServiceStateChange
+        from zeroconf import ServiceBrowser, Zeroconf
 
         zeroconf = Zeroconf()
         peers: list[DiscoveredPeer] = []
         event = threading.Event()
 
-        def add_service(zc: Zeroconf, service_type: str, name: str) -> None:
-            info = zc.get_service_info(service_type, name)
-            if info:
-                addresses = info.parsed_addresses()
-                if addresses:
-                    peers.append(DiscoveredPeer(
-                        service_name=name,
-                        address=addresses[0],
-                        port=info.port,
-                        properties={k.decode(): v.decode() for k, v in info.properties.items()},
-                    ))
-                    event.set()
+        class _Listener:
+            def add_service(self, zc: Zeroconf, service_type: str, name: str) -> None:
+                info = zc.get_service_info(service_type, name)
+                if info:
+                    addresses = info.parsed_addresses()
+                    if addresses:
+                        peers.append(DiscoveredPeer(
+                            service_name=name,
+                            address=addresses[0],
+                            port=info.port,
+                            properties={k.decode(): v.decode() for k, v in info.properties.items()},
+                        ))
+                        event.set()
 
-        browser = ServiceBrowser(zeroconf, self.SERVICE_TYPE, handlers=[ServiceStateChange(add=add_service)])
+            def remove_service(self, zc: Zeroconf, service_type: str, name: str) -> None:
+                pass
+
+            def update_service(self, zc: Zeroconf, service_type: str, name: str) -> None:
+                pass
+
+        browser = ServiceBrowser(zeroconf, self.SERVICE_TYPE, _Listener())
         event.wait(timeout=timeout)
         zeroconf.close()
         return peers
