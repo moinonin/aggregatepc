@@ -590,6 +590,55 @@ class TestInferenceProxy:
         assert status["available_models"] == []
         assert status["backends"][0]["reachable"] is False
 
+    def test_select_target_uses_requested_model_node(self, monkeypatch):
+        import scripts.start_inference as inference
+
+        proxy = inference.ClusterProxy()
+        monkeypatch.setattr(proxy, "_query_controller_status", lambda port: {
+            "workers": [
+                {
+                    "node_id": "local-test-pc",
+                    "address": "192.168.1.4",
+                    "models": ["small:latest"],
+                },
+                {
+                    "node_id": "remote-worker",
+                    "address": "192.168.100.31",
+                    "models": ["qwen2.5-coder:7b"],
+                },
+            ]
+        })
+        monkeypatch.setattr(
+            proxy,
+            "_get_worker_ollama_models",
+            lambda address, port: ["small:latest"] if address == "192.168.1.4" else ["qwen2.5-coder:7b"],
+        )
+
+        proxy.discover_cluster(8765, wait_seconds=0)
+        target, model = proxy.select_target("qwen2.5-coder:7b")
+
+        assert target["node_id"] == "remote-worker"
+        assert model == "qwen2.5-coder:7b"
+
+    def test_select_target_supports_ollama_prefixed_model_names(self, monkeypatch):
+        import scripts.start_inference as inference
+
+        proxy = inference.ClusterProxy()
+        monkeypatch.setattr(proxy, "_query_controller_status", lambda port: {
+            "workers": [{
+                "node_id": "remote-worker",
+                "address": "192.168.100.31",
+                "models": ["ollama://qwen2.5-coder:7b"],
+            }]
+        })
+        monkeypatch.setattr(proxy, "_get_worker_ollama_models", lambda address, port: ["qwen2.5-coder:7b"])
+
+        proxy.discover_cluster(8765, wait_seconds=0)
+        target, model = proxy.select_target("qwen2.5-coder:7b")
+
+        assert target["node_id"] == "remote-worker"
+        assert model == "qwen2.5-coder:7b"
+
 
 if __name__ == "__main__":
     import pytest

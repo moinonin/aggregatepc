@@ -140,6 +140,7 @@ class ClusterProxy:
         self._nodes = []  # [{address, port, models, score}]
         self._best_node = None
         self._best_model = None
+        self._model_to_node = {}
         self._lock = threading.Lock()
 
     def discover_cluster(self, controller_port: int, wait_seconds: int = 5):
@@ -158,6 +159,7 @@ class ClusterProxy:
             nodes = []
             best_node = None
             best_model = None
+            model_to_node = {}
 
             if status:
                 workers = status.get("workers", [])
@@ -189,7 +191,6 @@ class ClusterProxy:
 
                 # Find best model across cluster
                 all_model_infos = []
-                model_to_node = {}
                 for node in nodes:
                     if not node["backend_reachable"]:
                         continue
@@ -214,6 +215,7 @@ class ClusterProxy:
                 self._nodes = nodes
                 self._best_node = best_node
                 self._best_model = best_model
+                self._model_to_node = model_to_node
 
             if best_node or time.time() >= deadline:
                 return best_node
@@ -288,6 +290,15 @@ class ClusterProxy:
                 )),
             }
 
+    def select_target(self, requested_model: Optional[str]) -> tuple[Optional[dict], Optional[str]]:
+        """Select a backend for a requested model, falling back to the best model."""
+        normalized = _normalize_model_name(requested_model)
+        with self._lock:
+            if normalized and normalized not in ("any", "auto"):
+                return self._model_to_node.get(normalized), normalized
+
+            return self._best_node, self._best_model
+
 
 class ProxyHandler(BaseHTTPRequestHandler):
     """HTTP handler that proxies requests to the best cluster node."""
@@ -322,19 +333,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(content_length)
 
         if self.path in ("/v1/chat/completions", "/api/generate"):
-            # Route to the best node
-            target = self.server.proxy._best_node
+            requested_model = self._requested_model(body)
+            target, target_model = self.server.proxy.select_target(requested_model)
             if not target:
-                target = self.server.proxy.discover_cluster(self.server.proxy.controller_port, wait_seconds=2)
+                self.server.proxy.discover_cluster(self.server.proxy.controller_port, wait_seconds=2)
+                target, target_model = self.server.proxy.select_target(requested_model)
             if not target:
                 self.send_response(503)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                error = {"error": "No model available in cluster"}
+                error = {"error": f"Model not available in cluster: {requested_model}" if requested_model else "No model available in cluster"}
                 self.wfile.write(json.dumps(error).encode())
                 return
 
-            body = self._with_target_model(body, target)
+            body = self._with_target_model(body, target, target_model)
 
             # Determine target endpoint
             if self.path == "/v1/chat/completions":
@@ -365,7 +377,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
         # Suppress default logging for cleaner output
         pass
 
-    def _with_target_model(self, body: bytes, target: dict) -> bytes:
+    def _requested_model(self, body: bytes) -> Optional[str]:
+        """Extract requested model from an OpenAI/Ollama JSON request body."""
+        try:
+            payload = json.loads(body.decode())
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        return payload.get("model")
+
+    def _with_target_model(self, body: bytes, target: dict, target_model: Optional[str]) -> bytes:
         """Use the discovered model when clients send a placeholder model."""
         try:
             payload = json.loads(body.decode())
@@ -373,16 +393,22 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return body
 
         requested = payload.get("model")
-        target_model = self.server.proxy._best_model
         if requested in (None, "", "any") and target_model:
             payload["model"] = target_model
             return json.dumps(payload).encode()
 
-        if requested not in target.get("models", []) and target_model:
+        target_models = {_normalize_model_name(model) for model in target.get("models", [])}
+        if _normalize_model_name(requested) not in target_models and target_model:
             payload["model"] = target_model
             return json.dumps(payload).encode()
 
         return body
+
+
+def _normalize_model_name(model_name: Optional[str]) -> Optional[str]:
+    if not model_name:
+        return None
+    return model_name.replace("ollama://", "")
 
 
 def start_proxy():
