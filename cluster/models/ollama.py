@@ -87,22 +87,32 @@ def list_ollama_models() -> list[dict]:
             return []
 
         models = []
-        for line in result.stdout.strip().splitlines():
+        lines = result.stdout.strip().splitlines()
+        for line in lines:
+            # Handle both tab-separated and the standard ollama list format
+            # Format: NAME  ID  SIZE  MODIFIED
+            # Size can be "7.2 GB" or "270 MB"
             parts = line.split()
-            if len(parts) >= 2 and parts[0] != "NAME":
-                name = parts[0]
-                # Parse size if available
-                size_gb = 0
-                for part in parts:
-                    if "GB" in part:
-                        try:
-                            size_gb = float(part.replace("GB", ""))
-                        except ValueError:
-                            pass
-                models.append({
-                    "name": name,
-                    "size_gb": size_gb,
-                })
+            if len(parts) < 2 or parts[0] == "NAME":
+                continue
+            name = parts[0]
+            # Find size: look for a number followed by GB or MB
+            size_gb = 0.0
+            for i, part in enumerate(parts):
+                if part in ("GB", "MB") and i > 0:
+                    try:
+                        size_val = float(parts[i - 1])
+                        if part == "GB":
+                            size_gb = size_val
+                        elif part == "MB":
+                            size_gb = size_val / 1024
+                    except (ValueError, IndexError):
+                        pass
+                    break
+            models.append({
+                "name": name,
+                "size_gb": round(size_gb, 2),
+            })
         # Sort by size descending (largest first)
         models.sort(key=lambda m: m.get("size_gb", 0), reverse=True)
         return models

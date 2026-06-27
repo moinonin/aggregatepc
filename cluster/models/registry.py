@@ -13,6 +13,8 @@ import json
 import os
 import glob
 import logging
+import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -129,52 +131,44 @@ def discover_huggingface_models() -> list[ModelInfo]:
 
 
 def discover_ollama_models() -> list[ModelInfo]:
-    """Discover models managed by Ollama."""
+    """Discover models managed by Ollama using the ollama list command."""
     models: list[ModelInfo] = []
 
-    ollama_models_path = os.path.expanduser("~/.ollama/models")
-    if not os.path.isdir(ollama_models_path):
-        return models
+    try:
+        result = subprocess.run(
+            ["ollama", "list"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return models
 
-    # Ollama stores in manifests and blobs
-    manifests_path = os.path.join(ollama_models_path, "manifests", "registry.ollama.ai")
-    if os.path.isdir(manifests_path):
-        for org_dir in os.listdir(manifests_path):
-            org_path = os.path.join(manifests_path, org_dir)
-            if not os.path.isdir(org_path):
+        for line in result.stdout.strip().splitlines():
+            parts = line.split()
+            if len(parts) < 2 or parts[0] == "NAME":
                 continue
-            for model_dir in os.listdir(org_path):
-                model_path = os.path.join(org_path, model_dir)
-                if not os.path.isdir(model_path):
-                    continue
-                # Skip models that don't have actual model files
-                # (manifests are just metadata — check for blobs)
-                blobs_path = os.path.join(ollama_models_path, "blobs")
-                if not os.path.isdir(blobs_path):
-                    continue
-                size_mb = _dir_size_mb(model_path)
-                if size_mb < 10:
-                    # Likely just a manifest without actual model data
-                    continue
-                # Clean up model name for Ollama API
-                if org_dir == "library":
-                    model_name = model_dir
-                else:
-                    model_name = f"{org_dir}/{model_dir}"
-                # Normalize: replace underscores with colons for tags
-                if ":" not in model_name:
-                    model_name_normalized = model_name.replace("_", ":")
-                else:
-                    model_name_normalized = model_name
-                name, parameters, quantization = _parse_model_name(model_name_normalized)
-                models.append(ModelInfo(
-                    name=model_name_normalized,
-                    path=model_path,
-                    size_mb=size_mb,
-                    model_type="ollama",
-                    parameters=parameters,
-                    quantization=quantization,
-                ))
+            name = parts[0]
+            # Parse size
+            size_mb = 0
+            for i, part in enumerate(parts):
+                if part in ("GB", "MB") and i > 0:
+                    try:
+                        size_val = float(parts[i - 1])
+                        if part == "GB":
+                            size_mb = int(size_val * 1024)
+                        elif part == "MB":
+                            size_mb = int(size_val)
+                    except (ValueError, IndexError):
+                        pass
+                    break
+
+            models.append(ModelInfo(
+                name=name,
+                path=f"ollama://{name}",
+                size_mb=max(size_mb, 1),
+                model_type="ollama",
+            ))
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
 
     return models
 
