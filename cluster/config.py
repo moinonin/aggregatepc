@@ -26,6 +26,9 @@ def load_config(config_path: Optional[str] = None) -> dict:
         - worker_ips: list[str]
         - controller_port: int
         - status_port: int
+        - proxy_host: str | None
+        - proxy_port: int
+        - ollama_backends: dict[str, dict]
     """
     path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
 
@@ -34,6 +37,9 @@ def load_config(config_path: Optional[str] = None) -> dict:
         "worker_ips": [],
         "controller_port": DEFAULT_WORKER_PORT,
         "status_port": DEFAULT_WORKER_PORT + 1,
+        "proxy_host": None,
+        "proxy_port": 8000,
+        "ollama_backends": {},
     }
 
     if not path.exists():
@@ -55,17 +61,37 @@ def load_config(config_path: Optional[str] = None) -> dict:
                     continue
 
                 # Key = value
-                if "=" in line and current_section == "ports":
+                if "=" in line and current_section in ("ports", "proxy"):
                     key, _, value = line.partition("=")
                     key = key.strip().lower()
                     value = value.strip()
-                    try:
-                        if key == "controller_port":
-                            config["controller_port"] = int(value)
-                        elif key == "status_port":
-                            config["status_port"] = int(value)
-                    except ValueError:
-                        print(f"[aggregatepc] Warning: invalid port value at line {line_num}: {line}")
+                    if current_section == "ports":
+                        try:
+                            if key == "controller_port":
+                                config["controller_port"] = int(value)
+                            elif key == "status_port":
+                                config["status_port"] = int(value)
+                            elif key == "proxy_port":
+                                config["proxy_port"] = int(value)
+                        except ValueError:
+                            print(f"[aggregatepc] Warning: invalid port value at line {line_num}: {line}")
+                    elif current_section == "proxy":
+                        if key == "host":
+                            config["proxy_host"] = value
+                        elif key == "port":
+                            try:
+                                config["proxy_port"] = int(value)
+                            except ValueError:
+                                print(f"[aggregatepc] Warning: invalid proxy port at line {line_num}: {line}")
+                    continue
+
+                if "=" in line and current_section in ("ollama", "backends"):
+                    node_id, _, value = line.partition("=")
+                    node_id = node_id.strip()
+                    value = value.strip()
+                    host, port = _parse_host_port(value, default_port=11434)
+                    if node_id and host:
+                        config["ollama_backends"][node_id] = {"host": host, "port": port}
                     continue
 
                 # IP address line
@@ -82,6 +108,21 @@ def load_config(config_path: Optional[str] = None) -> dict:
         print(f"[aggregatepc] Warning: failed to read config from {path}: {e}")
 
     return config
+
+
+def _parse_host_port(value: str, default_port: int) -> tuple[str, int]:
+    """Parse host[:port] config values."""
+    host = value
+    port = default_port
+    if ":" in value:
+        host_part, _, port_part = value.rpartition(":")
+        if host_part:
+            host = host_part
+        try:
+            port = int(port_part)
+        except ValueError:
+            port = default_port
+    return host.strip(), port
 
 
 def save_default_config(config_path: Optional[str] = None) -> str:
@@ -118,6 +159,17 @@ def save_default_config(config_path: Optional[str] = None) -> str:
 # Override default ports here if needed
 # controller_port = 8765
 # status_port = 8766
+# proxy_port = 8000
+
+[proxy]
+# Optional: force the proxy bind address
+# host = 192.168.1.5
+
+[ollama]
+# Optional: per-worker Ollama backend overrides, useful behind NAT/port forwarding
+# worker-node-id = host:port
+# nr-dell = 192.168.1.2:11435
+# defi = 192.168.1.2:11436
 """
     path.write_text(content)
     return str(path)

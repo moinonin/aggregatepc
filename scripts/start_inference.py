@@ -15,6 +15,7 @@ Usage:
 
 import sys
 import os
+import errno
 import time
 import socket
 import json
@@ -150,7 +151,8 @@ class ClusterProxy:
         Uses the controller's status endpoint to get worker info,
         then checks each worker for available Ollama models.
         """
-        ollama_port = 11434
+        config = load_config()
+        backend_overrides = config.get("ollama_backends", {})
         self.controller_port = controller_port
         deadline = time.time() + wait_seconds
 
@@ -166,32 +168,33 @@ class ClusterProxy:
             if status:
                 workers = status.get("workers", [])
                 for worker_info in workers:
-                    address_candidates = _worker_backend_candidates(worker_info)
-                    if not address_candidates:
+                    backend_candidates = _worker_backend_candidates(worker_info, backend_overrides)
+                    if not backend_candidates:
                         continue
 
                     # Get models advertised by this worker
                     worker_models = worker_info.get("models", [])
 
                     # Also check if worker's Ollama is reachable via API
-                    backend_address, ollama_models = self._find_reachable_ollama(address_candidates, ollama_port)
+                    backend, ollama_models = self._find_reachable_ollama(backend_candidates)
                     backend_reachable = ollama_models is not None
+                    selected_backend = backend or backend_candidates[0]
 
                     # Combine: prefer explicitly advertised models, fall back to Ollama API
                     all_models = sorted(set(worker_models + (ollama_models or [])))
 
                     nodes.append({
                         "node_id": worker_info.get("node_id", worker_info.get("hostname", "unknown")),
-                        "address": backend_address or address_candidates[0],
+                        "address": selected_backend["host"],
                         "observed_address": worker_info.get("address"),
                         "advertised_address": worker_info.get("advertised_address"),
-                        "candidate_addresses": address_candidates,
+                        "candidate_addresses": [_format_backend_candidate(candidate) for candidate in backend_candidates],
                         "models": all_models,
                         "advertised_models": worker_models,
                         "backend_models": ollama_models or [],
                         "backend_reachable": backend_reachable,
                         "compute_score": worker_info.get("compute_score", 0),
-                        "ollama_port": ollama_port,
+                        "ollama_port": selected_backend["port"],
                     })
                     for model_name in all_models:
                         clean_name = _normalize_model_name(model_name)
@@ -270,12 +273,12 @@ class ClusterProxy:
             logger.debug(f"Could not reach Ollama on {worker_address}:{ollama_port}: {e}")
             return None
 
-    def _find_reachable_ollama(self, addresses: list[str], ollama_port: int) -> tuple[Optional[str], Optional[list[str]]]:
-        """Return the first address where Ollama responds."""
-        for address in addresses:
-            models = self._get_worker_ollama_models(address, ollama_port)
+    def _find_reachable_ollama(self, backends: list[dict]) -> tuple[Optional[dict], Optional[list[str]]]:
+        """Return the first backend where Ollama responds."""
+        for backend in backends:
+            models = self._get_worker_ollama_models(backend["host"], backend["port"])
             if models is not None:
-                return address, models
+                return backend, models
         return None, None
 
     def get_status(self) -> dict:
@@ -448,22 +451,52 @@ def _normalize_model_name(model_name: Optional[str]) -> Optional[str]:
     return model_name.replace("ollama://", "")
 
 
-def _worker_backend_candidates(worker_info: dict) -> list[str]:
-    """Return candidate IPs to try for a worker backend, in priority order."""
-    candidates = [
-        worker_info.get("backend_address"),
-        worker_info.get("ollama_host"),
-        worker_info.get("address"),
-        worker_info.get("advertised_address"),
-    ]
+def _worker_backend_candidates(worker_info: dict, backend_overrides: dict | None = None) -> list[dict]:
+    """Return candidate backends to try for a worker, in priority order."""
+    backend_overrides = backend_overrides or {}
+    node_id = worker_info.get("node_id") or worker_info.get("hostname")
+    candidates = []
+    override = backend_overrides.get(node_id)
+    if override:
+        candidates.append(override)
+
+    candidates.extend([
+        {"host": worker_info.get("backend_address"), "port": int(worker_info.get("backend_port", 11434))},
+        _backend_from_host_port(worker_info.get("ollama_host"), default_port=11434),
+        {"host": worker_info.get("address"), "port": 11434},
+        {"host": worker_info.get("advertised_address"), "port": 11434},
+    ])
+
     seen = set()
     ordered = []
     for candidate in candidates:
-        if not candidate or candidate in seen:
+        if not candidate or not candidate.get("host"):
             continue
-        seen.add(candidate)
-        ordered.append(candidate)
+        key = (candidate["host"], candidate["port"])
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append({"host": candidate["host"], "port": candidate["port"]})
     return ordered
+
+
+def _backend_from_host_port(value: Optional[str], default_port: int) -> dict:
+    if not value:
+        return {"host": None, "port": default_port}
+    host = value
+    port = default_port
+    if ":" in value:
+        host_part, _, port_part = value.rpartition(":")
+        host = host_part or host
+        try:
+            port = int(port_part)
+        except ValueError:
+            port = default_port
+    return {"host": host, "port": port}
+
+
+def _format_backend_candidate(candidate: dict) -> str:
+    return f"{candidate['host']}:{candidate['port']}"
 
 
 def start_proxy():
@@ -492,7 +525,15 @@ def start_proxy():
         print("[aggregatepc] Make sure workers are running: aggregatepc worker")
 
     # Start HTTP proxy
-    server = HTTPServer((proxy_host, proxy_port), ProxyHandler)
+    try:
+        server = HTTPServer((proxy_host, proxy_port), ProxyHandler)
+    except OSError as e:
+        if e.errno in (errno.EADDRINUSE, 48):
+            print(f"[aggregatepc] Proxy address already in use: {proxy_host}:{proxy_port}")
+            print(f"[aggregatepc] Existing proxy status: http://{proxy_host}:{proxy_port}/status")
+            print("[aggregatepc] Stop the existing proxy or set a different proxy port in configs/cluster.conf.")
+            sys.exit(1)
+        raise
     server.proxy = proxy
 
     proxy_url = f"http://{proxy_host}:{proxy_port}"

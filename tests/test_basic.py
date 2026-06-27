@@ -490,6 +490,24 @@ class TestConfig:
         config = load_config()
         assert len(config["worker_ips"]) >= 1
 
+    def test_config_loads_ollama_backend_overrides(self, tmp_path):
+        from cluster.config import load_config
+
+        config_path = tmp_path / "cluster.conf"
+        config_path.write_text("""
+[controller]
+192.168.1.4
+
+[ollama]
+nr-dell = 192.168.1.2:11435
+defi = 192.168.1.2:11436
+""")
+
+        config = load_config(str(config_path))
+
+        assert config["ollama_backends"]["nr-dell"] == {"host": "192.168.1.2", "port": 11435}
+        assert config["ollama_backends"]["defi"] == {"host": "192.168.1.2", "port": 11436}
+
 
 class TestModelDiscovery:
     def test_discover_returns_list(self):
@@ -646,10 +664,11 @@ class TestInferenceProxy:
 
         assert tried == ["192.168.1.2", "192.168.100.31"]
         assert target["address"] == "192.168.100.31"
+        assert target["ollama_port"] == 11434
         assert model == "qwen2.5-coder:7b"
         assert status["backends"][0]["observed_address"] == "192.168.1.2"
         assert status["backends"][0]["advertised_address"] == "192.168.100.31"
-        assert status["backends"][0]["candidate_addresses"] == ["192.168.1.2", "192.168.100.31"]
+        assert status["backends"][0]["candidate_addresses"] == ["192.168.1.2:11434", "192.168.100.31:11434"]
 
     def test_worker_backend_candidates_deduplicates_addresses(self):
         import scripts.start_inference as inference
@@ -657,7 +676,56 @@ class TestInferenceProxy:
         assert inference._worker_backend_candidates({
             "address": "192.168.1.2",
             "advertised_address": "192.168.1.2",
-        }) == ["192.168.1.2"]
+        }) == [{"host": "192.168.1.2", "port": 11434}]
+
+    def test_worker_backend_candidates_prefers_config_override(self):
+        import scripts.start_inference as inference
+
+        assert inference._worker_backend_candidates(
+            {
+                "node_id": "nr-dell",
+                "address": "192.168.1.2",
+                "advertised_address": "192.168.100.31",
+            },
+            {"nr-dell": {"host": "192.168.1.2", "port": 11435}},
+        ) == [
+            {"host": "192.168.1.2", "port": 11435},
+            {"host": "192.168.1.2", "port": 11434},
+            {"host": "192.168.100.31", "port": 11434},
+        ]
+
+    def test_cluster_discovery_uses_configured_backend_override(self, monkeypatch):
+        import scripts.start_inference as inference
+
+        tried = []
+        proxy = inference.ClusterProxy()
+        monkeypatch.setattr(inference, "load_config", lambda: {
+            "controller_ip": "192.168.1.4",
+            "ollama_backends": {"nr-dell": {"host": "192.168.1.2", "port": 11435}},
+        })
+        monkeypatch.setattr(proxy, "_query_controller_status", lambda port: {
+            "workers": [{
+                "node_id": "nr-dell",
+                "address": "192.168.1.2",
+                "advertised_address": "192.168.100.31",
+                "models": ["qwen2.5-coder:7b"],
+            }]
+        })
+
+        def fake_ollama_models(address, port):
+            tried.append((address, port))
+            if (address, port) == ("192.168.1.2", 11435):
+                return ["qwen2.5-coder:7b"]
+            return None
+
+        monkeypatch.setattr(proxy, "_get_worker_ollama_models", fake_ollama_models)
+
+        proxy.discover_cluster(8765, wait_seconds=0)
+        target, _ = proxy.select_target("qwen2.5-coder:7b")
+
+        assert tried == [("192.168.1.2", 11435)]
+        assert target["address"] == "192.168.1.2"
+        assert target["ollama_port"] == 11435
 
     def test_select_target_uses_requested_model_node(self, monkeypatch):
         import scripts.start_inference as inference
