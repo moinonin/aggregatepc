@@ -15,8 +15,8 @@ help: ## Show this help message
 	@echo "  make worker               Start as a worker (auto-discover controller)"
 	@echo "  make worker CONTROLLER=192.168.1.5  Join a specific controller"
 	@echo "  make profile              Detect hardware and scan for cluster"
-	@echo "  make status               Show cluster status"
-	@echo "  make inference            Select best cluster model and broadcast to workers"
+	@echo "  make status               Show cluster status (uses controller IP from config)"
+	@echo "  make inference            Start inference with best available model"
 	@echo "  make test                 Run tests"
 	@echo ""
 
@@ -37,17 +37,8 @@ profile: ## Profile hardware and optionally scan network
 		python3 aggregatepc.py profile; \
 	fi
 
-status: ## Show cluster status (optionally set CONTROLLER=<IP> PORT=<PORT>)
-	python3 -c "
-import sys; sys.path.insert(0, '.')
-from cluster.config import load_config
-config = load_config()
-controller = '$(or $(CONTROLLER),$(config.get(\"controller_ip\",\"127.0.0.1\")))'
-port = int('$(or $(PORT),$(config.get(\"controller_port\",8765)))')
-print(f'Querying controller at {controller}:{port}')
-import subprocess
-subprocess.run([sys.executable, 'aggregatepc.py', 'status', '--controller', controller, '--port', str(port)])
-"
+status: ## Show cluster status (uses controller IP from config)
+	python3 aggregatepc.py status --controller $(or $(CONTROLLER),$(shell python3 -c "import sys; sys.path.insert(0, '.'); from cluster.config import load_config; print(load_config().get('controller_ip','127.0.0.1'))")) --port $(or $(PORT),$(shell python3 -c "import sys; sys.path.insert(0, '.'); from cluster.config import load_config; print(load_config().get('controller_port',8765))"))
 
 inference: ## Start inference with best available model on the cluster
 	python3 scripts/start_inference.py --broadcast
