@@ -199,6 +199,28 @@ class WorkerDaemon:
         local_models = discover_all_models()
         model_names = [m.name for m in local_models]
 
+        # Fallback: if discover_all_models returns empty, check Ollama API directly
+        if not model_names:
+            try:
+                from cluster.models.ollama import list_ollama_models, is_ollama_installed
+                if is_ollama_installed():
+                    ollama_models = list_ollama_models()
+                    model_names = [m["name"] for m in ollama_models]
+            except Exception:
+                pass
+
+        # Last resort: check if there are model blobs in ~/.ollama/models/blobs/
+        if not model_names:
+            try:
+                blobs_dir = os.path.expanduser("~/.ollama/models/blobs")
+                if os.path.isdir(blobs_dir) and os.listdir(blobs_dir):
+                    # There are model blobs but Ollama daemon might not be running
+                    # Still report that models exist (Ollama can load them on demand)
+                    model_names = ["ollama-blobs-available"]
+                    logger.info(f"Found model blobs in {blobs_dir} but Ollama daemon not responding")
+            except Exception:
+                pass
+
         # Update the node's models
         self.node.models = model_names
 
@@ -248,8 +270,12 @@ class WorkerDaemon:
 
     def _delayed_advertise(self) -> None:
         """Wait for Ollama to start, then advertise models."""
-        time.sleep(8)  # Give Ollama time to start
-        self._advertise_models()
+        # Wait longer and retry to ensure Ollama daemon is ready
+        for attempt in range(3):
+            time.sleep(5)
+            self._advertise_models()
+            if self.node.models:
+                break
 
     def _start_ollama_service(self) -> None:
         """Start Ollama and load the best available model in a background thread."""
