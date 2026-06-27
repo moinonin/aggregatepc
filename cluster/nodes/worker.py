@@ -223,44 +223,6 @@ class WorkerDaemon:
 
         logger.info("Worker daemon started")
 
-    def _prepare_model(self, model_name: str) -> None:
-        """Prepare a model for serving based on controller instruction.
-
-        Tries Ollama first, then falls back to vLLM for HF models.
-        """
-        from cluster.models.ollama import (
-            is_ollama_installed, start_ollama_serve,
-            list_ollama_models, pull_ollama_model, load_ollama_model,
-        )
-
-        # Check if it's an Ollama model
-        if is_ollama_installed():
-            start_ollama_serve()
-            existing = list_ollama_models()
-            if any(m["name"] == model_name for m in existing):
-                print(f"[aggregatepc] Model {model_name} already available, loading...")
-                load_ollama_model(model_name)
-            else:
-                print(f"[aggregatepc] Pulling {model_name}...")
-                if pull_ollama_model(model_name):
-                    load_ollama_model(model_name)
-                    print(f"[aggregatepc] {model_name} ready at http://localhost:11434")
-                else:
-                    print(f"[aggregatepc] Failed to pull {model_name}")
-        else:
-            # Try as HuggingFace model
-            from cluster.models.registry import discover_all_models
-            models = discover_all_models()
-            hf_models = [m for m in models if m.name == model_name or model_name in m.name]
-            if hf_models:
-                model_path = hf_models[0].path
-                print(f"[aggregatepc] HuggingFace model found: {model_path}")
-                print(f"[aggregatepc] Install vLLM to serve: pip install vllm")
-                print(f"[aggregatepc] Then: python -m vllm.entrypoints.openai.api_server --model {model_path} --port 8000")
-            else:
-                print(f"[aggregatepc] Model {model_name} not found locally")
-                print(f"[aggregatepc] Pull with: ollama pull {model_name}")
-
     def _start_ollama_service(self) -> None:
         def _ollama_setup():
             try:

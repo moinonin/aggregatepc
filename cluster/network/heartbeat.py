@@ -125,10 +125,9 @@ class HeartbeatMonitor:
 class HeartbeatListener:
     """UDP listener that receives worker heartbeats on the controller."""
 
-    def __init__(self, port: int = 8765, on_join=None, on_leave=None, on_model_select=None):
+    def __init__(self, port: int = 8765, on_join=None, on_leave=None):
         self.port = port
         self._monitor = HeartbeatMonitor(on_join=on_join, on_leave=on_leave)
-        self._on_model_select = on_model_select
         self._running = False
         self._socket: Optional[socket.socket] = None
         self._listener_thread: Optional[object] = None
@@ -183,12 +182,6 @@ class HeartbeatListener:
                     }
                     resp = json.dumps(status).encode()
                     self._socket.sendto(resp, callback_addr)
-
-            elif msg_type == "model_select":
-                # Controller telling us which model to serve
-                model_name = msg.get("model", "")
-                if model_name and hasattr(self, '_on_model_select'):
-                    self._on_model_select(model_name)
 
         except (json.JSONDecodeError, KeyError) as e:
             logger.debug(f"Bad message from {addr}: {e}")

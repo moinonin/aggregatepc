@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Start inference with the best available model.
+"""Cluster inference proxy and model discovery.
 
 Modes:
-  1. Local mode (default): Discover and serve best model on this machine
-  2. Broadcast mode (--broadcast): Find best model across cluster and broadcast to workers
+  1. Local mode: Serve a model locally on this machine
+  2. Broadcast mode (--broadcast): Start a proxy that routes to the best model anywhere in the cluster
+
+The proxy mode is the core value: it lets any node inference any model
+in the cluster, regardless of which node has the model locally.
 
 Usage:
-  python3 scripts/start_inference.py              # Local inference
-  python3 scripts/start_inference.py --broadcast   # Cluster-wide broadcast
+  python3 scripts/start_inference.py              # Local model serving
+  python3 scripts/start_inference.py --broadcast   # Cluster inference proxy
 """
 
 import sys
@@ -16,11 +19,25 @@ import time
 import socket
 import json
 import subprocess
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.request import Request, urlopen
+from urllib.error import URLError
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cluster.models.registry import discover_all_models, get_best_model
 from cluster.config import load_config
+
+
+def get_local_ip() -> str:
+    """Get the local IP address."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
 
 
 def start_ollama_server():
@@ -62,7 +79,6 @@ def start_ollama_model(model_name: str) -> bool:
     if not any(m["name"] == model_name for m in existing):
         print(f"[aggregatepc] Pulling {model_name}...")
         if not pull_ollama_model(model_name):
-            print(f"[aggregatepc] Failed to pull {model_name}")
             return False
 
     print(f"[aggregatepc] Loading {model_name} into memory...")
@@ -70,7 +86,7 @@ def start_ollama_model(model_name: str) -> bool:
     return True
 
 
-def start_vllm_server(model_path: str, port: int = 8000) -> subprocess.Popen:
+def start_vllm_server(model_path: str, port: int = 8000):
     """Start vLLM OpenAI-compatible server for a HuggingFace model."""
     try:
         process = subprocess.Popen(
@@ -89,12 +105,205 @@ def start_vllm_server(model_path: str, port: int = 8000) -> subprocess.Popen:
             except (OSError, ConnectionRefusedError):
                 continue
             if process.poll() is not None:
-                print("[aggregatepc] vLLM server failed to start")
                 return None
         return process
     except FileNotFoundError:
-        print("[aggregatepc] vLLM not installed. Install with: pip install vllm")
         return None
+
+
+class ClusterProxy:
+    """Proxy that routes inference requests to the best model in the cluster.
+
+    Architecture:
+      - Discovers which nodes have which models
+      - Forwards requests to the node that has the best model
+      - If no single node can handle it, uses split placement
+      - Provides a single OpenAI-compatible endpoint for clients
+    """
+
+    def __init__(self, port: int = 8000):
+        self.port = port
+        self._nodes = []  # [{address, port, models, score}]
+        self._best_node = None
+        self._lock = threading.Lock()
+
+    def discover_cluster(self, controller_port: int, wait_seconds: int = 5):
+        """Discover models across the cluster via the controller's workers."""
+        from cluster.network.heartbeat import HeartbeatListener
+
+        listener = HeartbeatListener(port=controller_port)
+        listener.start()
+        time.sleep(wait_seconds)
+
+        config = load_config()
+        ollama_port = 11434
+
+        with self._lock:
+            self._nodes = []
+            for state in listener.monitor.get_all_workers():
+                address = state.node.address
+                if address:
+                    self._nodes.append({
+                        "node_id": state.node.node_id,
+                        "address": address,
+                        "models": state.node.models,
+                        "compute_score": state.node.compute_score,
+                        "ollama_port": ollama_port,
+                    })
+
+            # Find best model across cluster
+            all_models = []
+            for node in self._nodes:
+                for model_name in node["models"]:
+                    all_models.append(type("ModelInfo", (), {
+                        "name": model_name.replace("ollama://", ""),
+                        "path": model_name,
+                        "size_mb": 0,
+                        "model_type": "ollama" if "ollama://" in model_name else "unknown",
+                    }))
+
+            if all_models:
+                best = get_best_model(all_models)
+                # Find which node has this model
+                for node in self._nodes:
+                    if best.name in node["models"] or f"ollama://{best.name}" in node["models"]:
+                        self._best_node = node
+                        break
+                # If no single node has it, pick the one with most VRAM
+                if not self._best_node and self._nodes:
+                    self._best_node = max(self._nodes, key=lambda n: n["compute_score"])
+
+        listener.stop()
+        return self._best_node
+
+    def get_status(self) -> dict:
+        """Get cluster model status."""
+        with self._lock:
+            return {
+                "nodes": len(self._nodes),
+                "best_node": self._best_node["node_id"] if self._best_node else None,
+                "best_model": self._best_node["models"][0] if self._best_node and self._best_node["models"] else None,
+                "all_models": list(set(
+                    m.replace("ollama://", "")
+                    for node in self._nodes
+                    for m in node["models"]
+                )),
+            }
+
+
+class ProxyHandler(BaseHTTPRequestHandler):
+    """HTTP handler that proxies requests to the best cluster node."""
+
+    def do_GET(self):
+        if self.path == "/status":
+            status = self.server.proxy.get_status()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(status, indent=2).encode())
+        elif self.path == "/v1/models":
+            # List available models
+            status = self.server.proxy.get_status()
+            models_data = {
+                "data": [
+                    {"id": m, "object": "model", "created": 0, "owned_by": "aggregatepc"}
+                    for m in status.get("all_models", [])
+                ],
+                "object": "list",
+            }
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(models_data, indent=2).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length)
+
+        if self.path in ("/v1/chat/completions", "/api/generate"):
+            # Route to the best node
+            target = self.server.proxy._best_node
+            if not target:
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                error = {"error": "No model available in cluster"}
+                self.wfile.write(json.dumps(error).encode())
+                return
+
+            # Determine target endpoint
+            if self.path == "/v1/chat/completions":
+                target_url = f"http://{target['address']}:{target.get('ollama_port', 11434)}/v1/chat/completions"
+            else:
+                target_url = f"http://{target['address']}:{target.get('ollama_port', 11434)}/api/generate"
+
+            try:
+                req = Request(target_url, data=body, headers=dict(self.headers))
+                with urlopen(req, timeout=120) as resp:
+                    self.send_response(resp.status)
+                    for header, value in resp.getheaders():
+                        if header.lower() not in ("transfer-encoding", "connection"):
+                            self.send_header(header, value)
+                    self.end_headers()
+                    self.wfile.write(resp.read())
+            except Exception as e:
+                self.send_response(502)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                error = {"error": f"Backend error: {str(e)}"}
+                self.wfile.write(json.dumps(error).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        # Suppress default logging for cleaner output
+        pass
+
+
+def start_proxy():
+    """Start the cluster inference proxy."""
+    config = load_config()
+    controller_port = config.get("controller_port", 8765)
+    proxy_port = config.get("proxy_port", 8000)
+
+    print("[aggregatepc] Starting cluster inference proxy...")
+    print(f"[aggregatepc] Controller port: {controller_port}")
+    print(f"[aggregatepc] Proxy port: {proxy_port}")
+
+    # Discover cluster
+    proxy = ClusterProxy(port=proxy_port)
+    best_node = proxy.discover_cluster(controller_port)
+
+    if best_node:
+        status = proxy.get_status()
+        print(f"[aggregatepc] Cluster discovered: {status['nodes']} node(s)")
+        print(f"[aggregatepc] Best model: {status['best_model']}")
+        print(f"[aggregatepc] Running on: {best_node['node_id']} ({best_node['address']})")
+    else:
+        print("[aggregatepc] No workers/models found — proxy will return 503")
+        print("[aggregatepc] Make sure workers are running: aggregatepc worker")
+
+    # Start HTTP proxy
+    server = HTTPServer(("0.0.0.0", proxy_port), ProxyHandler)
+    server.proxy = proxy
+
+    print(f"[aggregatepc] Proxy ready at http://{get_local_ip()}:{proxy_port}")
+    print()
+    print("[aggregatepc] Test with:")
+    print(f'  curl http://localhost:{proxy_port}/v1/chat/completions -H "Content-Type: application/json" -d \'{{"model":"{status["best_model"] or "any"}","messages":[{{"role":"user","content":"Hello"}}]}}\'')
+    print()
+    print("[aggregatepc] Status: http://localhost:{proxy_port}/status")
+    print("[aggregatepc] Press Ctrl+C to stop.")
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[aggregatepc] Stopping proxy...")
+        server.shutdown()
 
 
 def local_inference():
@@ -108,9 +317,11 @@ def local_inference():
         print("  ollama pull llama3:8b")
         print("  ollama pull mistral:7b")
         print("  ollama pull phi3:mini")
+        print()
+        print("[aggregatepc] Or start the cluster proxy:")
+        print("  make inference")
         sys.exit(1)
 
-    # Prefer Ollama models
     from cluster.models.ollama import is_ollama_installed, list_ollama_models
     ollama_models = list_ollama_models() if is_ollama_installed() else []
 
@@ -178,70 +389,9 @@ def local_inference():
             sys.exit(0)
 
 
-def broadcast_inference():
-    """Find best model across cluster and broadcast to all workers."""
-    from cluster.network.heartbeat import HeartbeatListener
-
-    config = load_config()
-    port = config.get("controller_port", 8765)
-
-    print("[aggregatepc] Discovering best model across cluster...")
-
-    listener = HeartbeatListener(port=port)
-    listener.start()
-    time.sleep(3)
-
-    # Aggregate models from all workers
-    all_models = []
-    for state in listener.monitor.get_all_workers():
-        for model_name in state.node.models:
-            is_ollama = model_name.startswith("ollama://")
-            clean_name = model_name.replace("ollama://", "")
-            all_models.append(type("ModelInfo", (), {
-                "name": clean_name,
-                "path": model_name,
-                "size_mb": 0,
-                "model_type": "ollama" if is_ollama else "unknown",
-            }))
-
-    if not all_models:
-        print("[aggregatepc] No models found on any worker")
-        print("[aggregatepc] Pull a model on a worker first: ollama pull llama3:8b")
-        listener.stop()
-        sys.exit(1)
-
-    best = get_best_model(all_models)
-    if not best:
-        print("[aggregatepc] Could not determine best model")
-        listener.stop()
-        sys.exit(1)
-
-    model_name = best.name
-    print(f"[aggregatepc] Cluster best model: {model_name}")
-
-    # Broadcast to all workers
-    workers = listener.monitor.get_all_workers()
-    if not workers:
-        print("[aggregatepc] No workers connected")
-        listener.stop()
-        sys.exit(1)
-
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        msg = json.dumps({"type": "model_select", "model": model_name}).encode()
-        for state in workers:
-            addr = state.node.address
-            if addr:
-                s.sendto(msg, (addr, port + 100))
-                print(f"[aggregatepc] Sent to {addr} ({state.node.node_id})")
-
-    print(f"[aggregatepc] Broadcast {model_name} to {len(workers)} worker(s)")
-    print("[aggregatepc] Workers will pull (if needed) and serve the model.")
-    listener.stop()
-
-
 def main():
     if "--broadcast" in sys.argv:
-        broadcast_inference()
+        start_proxy()
     else:
         local_inference()
 

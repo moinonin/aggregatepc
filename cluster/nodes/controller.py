@@ -67,14 +67,7 @@ class ClusterController:
         def on_leave(node: Node) -> None:
             print(f"[aggregatepc] - Worker left: {node.node_id} ({node.hardware.hostname})")
 
-        # Callback for model selection from controller
-        def on_model_select(model_name: str) -> None:
-            print(f"[aggregatepc] Controller selected model: {model_name}")
-            self._prepare_model(model_name)
-
-        self._heartbeat_listener = HeartbeatListener(
-            port=port, on_join=on_join, on_leave=on_leave, on_model_select=on_model_select
-        )
+        self._heartbeat_listener = HeartbeatListener(port=port, on_join=on_join, on_leave=on_leave)
 
     def _build_controller_node(self) -> Node:
         """Create a Node representing this controller."""
@@ -165,57 +158,6 @@ class ClusterController:
             logger.info("Interrupted — shutting down")
         finally:
             self.stop()
-
-    def get_cluster_best_model(self) -> Optional[dict]:
-        """Get the best model across the entire cluster.
-
-        Aggregates models from all workers and selects the best one
-        using the same logic as node-level selection (prefers Ollama).
-        """
-        from cluster.models.registry import ModelInfo, get_best_model
-
-        all_models: list[ModelInfo] = []
-        for state in self._heartbeat_listener.monitor.get_all_workers():
-            for model_name in state.node.models:
-                # Determine model type from name format
-                model_type = "ollama" if not model_name.startswith("ollama://") else "ollama"
-                if model_name.startswith("ollama://"):
-                    model_name = model_name.replace("ollama://", "")
-                all_models.append(ModelInfo(
-                    name=model_name,
-                    path=f"ollama://{model_name}",
-                    size_mb=0,  # Size unknown from join message
-                    model_type=model_type,
-                ))
-
-        if not all_models:
-            return None
-
-        best = get_best_model(all_models)
-        if best:
-            return {"name": best.name, "type": best.model_type}
-        return None
-
-    def broadcast_model(self, model_name: str) -> None:
-        """Send a model selection command to all workers.
-
-        Workers will pull (if needed) and prepare the model.
-        """
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                msg = json.dumps({
-                    "type": "model_select",
-                    "model": model_name,
-                }).encode()
-                # Broadcast to all known workers
-                for state in self._heartbeat_listener.monitor.get_all_workers():
-                    address = state.node.address
-                    if address:
-                        s.sendto(msg, (address, self.port + 100))
-                logger.info(f"Broadcast model selection: {model_name}")
-                print(f"[aggregatepc] Broadcast model to workers: {model_name}")
-        except Exception as e:
-            logger.error(f"Failed to broadcast model: {e}")
 
 
 def get_local_ip() -> str:
