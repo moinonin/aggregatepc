@@ -12,6 +12,8 @@ You are an experienced senior developer working on this codebase. Prioritize sim
 
 **SYSTEM RULE:** Before any development work begins, the user MUST fill in all placeholder project-specific sections in this AGENTS.md (marked with instructions like "Briefly describe..." or "List important modules..."). These placeholders guide initial project setup and ensure agents have the context they need.
 
+**GIT SAFETY:** Never commit, push, or rewrite history unless the user explicitly requests it. Always ask before running `git commit`, `git push`, `git rebase`, `git reset`, or any other git operation that modifies history or sends data to a remote. Creating branches, staging files, and inspecting status/diff are always safe.
+
 ---
 
 ## 1. 🏗️ Project Overview
