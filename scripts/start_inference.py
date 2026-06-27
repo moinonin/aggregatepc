@@ -128,53 +128,97 @@ class ClusterProxy:
         self._lock = threading.Lock()
 
     def discover_cluster(self, controller_port: int, wait_seconds: int = 5):
-        """Discover models across the cluster via the controller's workers."""
-        from cluster.network.heartbeat import HeartbeatListener
+        """Discover models across the cluster by querying the controller.
 
-        listener = HeartbeatListener(port=controller_port)
-        listener.start()
-        time.sleep(wait_seconds)
-
+        Uses the controller's status endpoint to get worker info,
+        then checks each worker for available Ollama models.
+        """
         config = load_config()
         ollama_port = 11434
 
         with self._lock:
             self._nodes = []
-            for state in listener.monitor.get_all_workers():
-                address = state.node.address
-                if address:
-                    self._nodes.append({
-                        "node_id": state.node.node_id,
-                        "address": address,
-                        "models": state.node.models,
-                        "compute_score": state.node.compute_score,
-                        "ollama_port": ollama_port,
-                    })
+
+            # Query controller status to get worker addresses
+            status = self._query_controller_status(controller_port)
+            if not status:
+                return None
+
+            workers = status.get("workers", [])
+            for worker_info in workers:
+                address = worker_info.get("address")
+                if not address:
+                    continue
+
+                # Get models advertised by this worker
+                worker_models = worker_info.get("models", [])
+
+                # Also check if worker's Ollama has models via API
+                ollama_models = self._get_worker_ollama_models(address, ollama_port)
+
+                # Combine: prefer explicitly advertised models, fall back to Ollama API
+                all_models = list(set(worker_models + ollama_models))
+
+                self._nodes.append({
+                    "node_id": worker_info.get("node_id", worker_info.get("hostname", "unknown")),
+                    "address": address,
+                    "models": all_models,
+                    "compute_score": worker_info.get("compute_score", 0),
+                    "ollama_port": ollama_port,
+                })
 
             # Find best model across cluster
             all_models = []
+            model_to_node = {}
             for node in self._nodes:
                 for model_name in node["models"]:
+                    clean_name = model_name.replace("ollama://", "")
                     all_models.append(type("ModelInfo", (), {
-                        "name": model_name.replace("ollama://", ""),
+                        "name": clean_name,
                         "path": model_name,
                         "size_mb": 0,
-                        "model_type": "ollama" if "ollama://" in model_name else "unknown",
+                        "model_type": "ollama",
                     }))
+                    # Track which node has which model
+                    if clean_name not in model_to_node:
+                        model_to_node[clean_name] = node
 
             if all_models:
                 best = get_best_model(all_models)
-                # Find which node has this model
-                for node in self._nodes:
-                    if best.name in node["models"] or f"ollama://{best.name}" in node["models"]:
-                        self._best_node = node
-                        break
-                # If no single node has it, pick the one with most VRAM
-                if not self._best_node and self._nodes:
-                    self._best_node = max(self._nodes, key=lambda n: n["compute_score"])
+                self._best_node = model_to_node.get(best.name, self._nodes[0] if self._nodes else None)
 
-        listener.stop()
         return self._best_node
+
+    def _query_controller_status(self, controller_port: int) -> Optional[dict]:
+        """Query the controller's status to get worker info."""
+        try:
+            # Controller responds to status_query messages
+            msg = json.dumps({
+                "type": "status_query",
+                "status_callback": {"address": "127.0.0.1", "port": controller_port + 50}
+            }).encode()
+
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.settimeout(5.0)
+                # Send to localhost (proxy runs on controller or worker)
+                s.sendto(msg, ("127.0.0.1", controller_port))
+                data, _ = s.recvfrom(8192)
+                return json.loads(data.decode())
+        except Exception as e:
+            logger.debug(f"Could not query controller: {e}")
+            return None
+
+    def _get_worker_ollama_models(self, worker_address: str, ollama_port: int) -> list[str]:
+        """Check what Ollama models are available on a worker."""
+        try:
+            url = f"http://{worker_address}:{ollama_port}/api/tags"
+            req = Request(url)
+            with urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+                models = data.get("models", [])
+                return [m["name"] for m in models]
+        except Exception:
+            return []
 
     def get_status(self) -> dict:
         """Get cluster model status."""
