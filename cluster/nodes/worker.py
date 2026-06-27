@@ -214,16 +214,15 @@ class WorkerDaemon:
             try:
                 blobs_dir = os.path.expanduser("~/.ollama/models/blobs")
                 if os.path.isdir(blobs_dir) and os.listdir(blobs_dir):
-                    # There are model blobs but Ollama daemon might not be running
-                    # Still report that models exist (Ollama can load them on demand)
                     model_names = ["ollama-blobs-available"]
-                    logger.info(f"Found model blobs in {blobs_dir} but Ollama daemon not responding")
+                    print(f"Found model blobs in {blobs_dir} but Ollama daemon not responding")
             except Exception:
                 pass
 
         # Update the node's models
         self.node.models = model_names
 
+        print(f"[aggregatepc] ADVERTISE: discovered models: {model_names}")
         if model_names:
             logger.info(f"Updated models: {', '.join(model_names)}")
 
@@ -240,7 +239,9 @@ class WorkerDaemon:
                     "models": model_names,
                 }).encode()
                 s.sendto(msg, (self._controller_address, self.config.controller_port))
+                print(f"[aggregatepc] ADVERTISE: sent heartbeat with {len(model_names)} model(s) to {self._controller_address}:{self.config.controller_port}")
         except Exception as e:
+            print(f"[aggregatepc] ADVERTISE ERROR: {e}")
             logger.debug(f"Failed to advertise models: {e}")
 
     def start(self) -> None:
