@@ -135,18 +135,97 @@ Output:
 - Python 3.10+
 - Windows 10+, Linux (any modern distro), or macOS 12+
 - All machines on the same local network (same subnet)
-- No external dependencies beyond Python standard library (pytest optional for tests)
+- No external dependencies beyond Python standard library
 
-### Setup
+### Install from source (recommended)
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/moinonin/aggregatepc.git
+cd aggregatepc
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+This installs the `aggregatepc` command and the `zeroconf` dependency for mDNS auto-discovery.
+
+### Install without packaging
+
+If you don't want to install, you can run directly:
+
+```bash
+git clone https://github.com/moinonin/aggregatepc.git
 cd aggregatepc
 python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-That's it. No `pip install` needed for the core system.
+Then use `python3 aggregatepc.py` instead of `aggregatepc`.
+
+### Install on worker machines only
+
+Workers don't need `zeroconf` if you're providing the controller IP explicitly:
+
+```bash
+git clone https://github.com/moinonin/aggregatepc.git
+cd aggregatepc
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+Workers can then join with:
+
+```bash
+python3 aggregatepc.py worker --controller <CONTROLLER_IP>
+```
+
+### Development install (includes test dependencies)
+
+```bash
+pip install -e ".[dev]"
+# or manually:
+pip install pytest zeroconf
+```
+
+### Verify installation
+
+```bash
+aggregatepc --help
+# or without install:
+python3 aggregatepc.py --help
+```
+
+You should see:
+
+```
+usage: aggregatepc [-h] [--config CONFIG]
+                   {controller,worker,profile,status} ...
+
+AggregatePC - Distributed heterogeneous compute for idle PCs
+```
+
+### Platform-specific notes
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt install python3 python3-venv
+```
+
+**macOS:**
+```bash
+# Python 3.10+ is pre-installed on macOS 12+
+# If not, use Homebrew:
+brew install python@3.11
+```
+
+**Windows:**
+```powershell
+# Use the official Python installer or Windows Store
+# Then in PowerShell:
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e .
+```
 
 ---
 
