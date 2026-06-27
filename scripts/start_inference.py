@@ -44,6 +44,11 @@ def get_local_ip() -> str:
         return "127.0.0.1"
 
 
+def get_proxy_host(config: dict) -> str:
+    """Return the IP address the inference proxy should bind and advertise."""
+    return config.get("proxy_host") or get_local_ip()
+
+
 def start_ollama_server():
     """Start Ollama server if not already running."""
     try:
@@ -56,10 +61,13 @@ def start_ollama_server():
 
     print("[aggregatepc] Starting Ollama server...")
     try:
+        env = os.environ.copy()
+        env.setdefault("OLLAMA_HOST", "0.0.0.0:11434")
         subprocess.Popen(
             ["ollama", "serve"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=env,
         )
         for _ in range(15):
             time.sleep(1.0)
@@ -95,7 +103,8 @@ def start_vllm_server(model_path: str, port: int = 8000):
     try:
         process = subprocess.Popen(
             ["python", "-m", "vllm.entrypoints.openai.api_server",
-             "--model", model_path, "--port", str(port), "--trust-remote-code"],
+             "--model", model_path, "--host", "0.0.0.0",
+             "--port", str(port), "--trust-remote-code"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -380,10 +389,11 @@ def start_proxy():
     config = load_config()
     controller_port = config.get("controller_port", 8765)
     proxy_port = config.get("proxy_port", 8000)
+    proxy_host = get_proxy_host(config)
 
     print("[aggregatepc] Starting cluster inference proxy...")
     print(f"[aggregatepc] Controller port: {controller_port}")
-    print(f"[aggregatepc] Proxy port: {proxy_port}")
+    print(f"[aggregatepc] Proxy address: {proxy_host}:{proxy_port}")
 
     # Discover cluster
     proxy = ClusterProxy(port=proxy_port)
@@ -400,15 +410,16 @@ def start_proxy():
         print("[aggregatepc] Make sure workers are running: aggregatepc worker")
 
     # Start HTTP proxy
-    server = HTTPServer(("0.0.0.0", proxy_port), ProxyHandler)
+    server = HTTPServer((proxy_host, proxy_port), ProxyHandler)
     server.proxy = proxy
 
-    print(f"[aggregatepc] Proxy ready at http://{get_local_ip()}:{proxy_port}")
+    proxy_url = f"http://{proxy_host}:{proxy_port}"
+    print(f"[aggregatepc] Proxy ready at {proxy_url}")
     print()
     print("[aggregatepc] Test with:")
-    print(f'  curl http://localhost:{proxy_port}/v1/chat/completions -H "Content-Type: application/json" -d \'{{"model":"{status["best_model"] or "any"}","messages":[{{"role":"user","content":"Hello"}}]}}\'')
+    print(f'  curl {proxy_url}/v1/chat/completions -H "Content-Type: application/json" -d \'{{"model":"{status["best_model"] or "any"}","messages":[{{"role":"user","content":"Hello"}}]}}\'')
     print()
-    print(f"[aggregatepc] Status: http://localhost:{proxy_port}/status")
+    print(f"[aggregatepc] Status: {proxy_url}/status")
     print("[aggregatepc] Press Ctrl+C to stop.")
 
     try:
@@ -452,11 +463,12 @@ def local_inference():
             print(f"[aggregatepc] Could not start model {target_model_name}")
             sys.exit(1)
 
-        print(f"[aggregatepc] Ollama serving {target_model_name} at http://localhost:11434")
-        print(f"[aggregatepc] API endpoint: http://localhost:11434/api/generate")
+        local_ip = get_local_ip()
+        print(f"[aggregatepc] Ollama serving {target_model_name} at http://{local_ip}:11434")
+        print(f"[aggregatepc] API endpoint: http://{local_ip}:11434/api/generate")
         print()
         print("[aggregatepc] Test with:")
-        print(f'  curl http://localhost:11434/api/generate -d \'{{"model":"{target_model_name}","prompt":"Hello","stream":false}}\'')
+        print(f'  curl http://{local_ip}:11434/api/generate -d \'{{"model":"{target_model_name}","prompt":"Hello","stream":false}}\'')
         print()
         print("[aggregatepc] Ollama server is running. Press Ctrl+C to stop.")
 
@@ -481,11 +493,12 @@ def local_inference():
             print(f"[aggregatepc] Starting vLLM server for {best.name}...")
             process = start_vllm_server(best.path)
             if process:
-                print(f"[aggregatepc] vLLM serving {best.name} at http://localhost:8000")
-                print(f"[aggregatepc] API endpoint: http://localhost:8000/v1/chat/completions")
+                local_ip = get_local_ip()
+                print(f"[aggregatepc] vLLM serving {best.name} at http://{local_ip}:8000")
+                print(f"[aggregatepc] API endpoint: http://{local_ip}:8000/v1/chat/completions")
                 print()
                 print("[aggregatepc] Test with:")
-                print(f'  curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d \'{{"model":"{best.name}","messages":[{{"role":"user","content":"Hello"}}]}}\'')
+                print(f'  curl http://{local_ip}:8000/v1/chat/completions -H "Content-Type: application/json" -d \'{{"model":"{best.name}","messages":[{{"role":"user","content":"Hello"}}]}}\'')
                 print()
                 print("[aggregatepc] vLLM server is running. Press Ctrl+C to stop.")
                 try:

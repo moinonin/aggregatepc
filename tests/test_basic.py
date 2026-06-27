@@ -499,6 +499,20 @@ class TestModelDiscovery:
 
 
 class TestInferenceProxy:
+    def test_proxy_host_defaults_to_node_ip(self, monkeypatch):
+        import scripts.start_inference as inference
+
+        monkeypatch.setattr(inference, "get_local_ip", lambda: "192.168.1.4")
+
+        assert inference.get_proxy_host({}) == "192.168.1.4"
+
+    def test_proxy_host_can_be_overridden(self, monkeypatch):
+        import scripts.start_inference as inference
+
+        monkeypatch.setattr(inference, "get_local_ip", lambda: "192.168.1.4")
+
+        assert inference.get_proxy_host({"proxy_host": "192.168.100.50"}) == "192.168.100.50"
+
     def test_controller_status_query_uses_bound_callback_port(self, monkeypatch):
         import scripts.start_inference as inference
 
