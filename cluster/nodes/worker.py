@@ -41,7 +41,6 @@ def _get_cpu_usage() -> float:
     """Get current CPU usage percentage (0-100)."""
     try:
         if os.name == "posix":
-            # Quick POSIX CPU usage from /proc/stat
             with open("/proc/stat", "r") as f:
                 line = f.readline()
             fields = line.split()
@@ -49,11 +48,10 @@ def _get_cpu_usage() -> float:
             total = sum(int(x) for x in fields[1:])
             return (1 - idle / total) * 100 if total > 0 else 0.0
         else:
-            # Fallback: use psutil if available
             import psutil
             return psutil.cpu_percent(interval=0.5)
     except Exception:
-        return 100.0  # Assume busy if we can't measure
+        return 100.0
 
 
 def _get_memory_usage() -> float:
@@ -155,6 +153,7 @@ class WorkerDaemon:
                     "status": self.node.status.value,
                     "compute_score": self.node.compute_score,
                     "address": self._get_local_ip(),
+                    "models": self.node.models,
                 }).encode()
                 s.sendto(msg, (self._controller_address, self.config.controller_port))
         except Exception as e:
@@ -171,15 +170,7 @@ class WorkerDaemon:
 
     def join(self, controller_address: str) -> bool:
         """Join a cluster by contacting the controller."""
-        from cluster.models.registry import discover_all_models
-
         self._controller_address = controller_address
-
-        # Discover models already pulled on this node
-        local_models = discover_all_models()
-        model_names = [m.name for m in local_models]
-        if model_names:
-            logger.info(f"Local models: {', '.join(model_names)}")
 
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -189,7 +180,7 @@ class WorkerDaemon:
                     "node_id": self.node.node_id,
                     "hardware": self.node.to_dict()["hardware"],
                     "address": self._get_local_ip(),
-                    "models": model_names,
+                    "models": [],  # Will be updated after Ollama starts
                 }).encode()
                 s.sendto(msg, (controller_address, self.config.controller_port))
 
@@ -200,6 +191,35 @@ class WorkerDaemon:
         except Exception as e:
             logger.error(f"Failed to join cluster: {e}")
             return False
+
+    def _advertise_models(self) -> None:
+        """Re-discover and advertise models to the controller after Ollama starts."""
+        from cluster.models.registry import discover_all_models
+
+        local_models = discover_all_models()
+        model_names = [m.name for m in local_models]
+
+        # Update the node's models
+        self.node.models = model_names
+
+        if model_names:
+            logger.info(f"Updated models: {', '.join(model_names)}")
+
+        # Send a heartbeat with updated models
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.settimeout(2.0)
+                msg = json.dumps({
+                    "type": "heartbeat",
+                    "node_id": self.node.node_id,
+                    "status": self.node.status.value,
+                    "compute_score": self.node.compute_score,
+                    "address": self._get_local_ip(),
+                    "models": model_names,
+                }).encode()
+                s.sendto(msg, (self._controller_address, self.config.controller_port))
+        except Exception as e:
+            logger.debug(f"Failed to advertise models: {e}")
 
     def start(self) -> None:
         """Start the worker daemon."""
@@ -221,9 +241,18 @@ class WorkerDaemon:
         # Auto-start Ollama and serve best model
         self._start_ollama_service()
 
+        # After Ollama is running, advertise models to controller
+        threading.Thread(target=self._delayed_advertise, daemon=True).start()
+
         logger.info("Worker daemon started")
 
+    def _delayed_advertise(self) -> None:
+        """Wait for Ollama to start, then advertise models."""
+        time.sleep(8)  # Give Ollama time to start
+        self._advertise_models()
+
     def _start_ollama_service(self) -> None:
+        """Start Ollama and load the best available model in a background thread."""
         def _ollama_setup():
             try:
                 from cluster.models.ollama import (
@@ -250,7 +279,6 @@ class WorkerDaemon:
                     if best.model_type == "ollama":
                         logger.info(f"Best model (ollama): {best.name}")
                     else:
-                        # Try to find an Ollama version of the best model
                         ollama_best = get_best_ollama_model()
                         if ollama_best:
                             logger.info(f"Best model (ollama): {ollama_best}")
@@ -305,8 +333,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AggregatePC Worker Daemon")
     parser.add_argument("--controller", type=str, default=None, help="Controller IP address")
     parser.add_argument("--controller-port", type=int, default=8765, help="Controller UDP port (default: 8765)")
-    parser.add_argument("--cpu-threshold", type=float, default=25.0, help="Max CPU %% to be considered idle")
-    parser.add_argument("--mem-threshold", type=float, default=75.0, help="Max memory %% to be considered idle")
+    parser.add_argument("--cpu-threshold", type=float, default=25.0, help="Max CPU % to be considered idle")
+    parser.add_argument("--mem-threshold", type=float, default=75.0, help="Max memory % to be considered idle")
     parser.add_argument("--idle-duration", type=float, default=30.0, help="Seconds of idle before accepting work")
     args = parser.parse_args()
 
@@ -325,7 +353,7 @@ if __name__ == "__main__":
         if daemon.join(args.controller):
             print(f"Joined controller at {args.controller}")
         else:
-            print("Failed to joining controller")
+            print("Failed to join controller")
             exit(1)
 
     daemon.run_forever()

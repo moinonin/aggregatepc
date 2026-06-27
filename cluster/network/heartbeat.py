@@ -159,6 +159,11 @@ class HeartbeatListener:
                     self._socket.sendto(ack, addr)
 
             elif msg_type == "heartbeat":
+                # Update models if sent in heartbeat
+                if "models" in msg:
+                    node_id = msg["node_id"]
+                    if node_id in self._monitor._workers:
+                        self._monitor._workers[node_id].node.models = msg.get("models", [])
                 self._monitor.record_heartbeat(
                     msg["node_id"],
                     msg.get("status", "idle"),
