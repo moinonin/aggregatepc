@@ -32,6 +32,7 @@ class Node:
     status: NodeStatus = NodeStatus.IDLE
     last_heartbeat: float = field(default_factory=time.time)
     address: Optional[str] = None  # IPv4 address on the local network
+    advertised_address: Optional[str] = None  # Address reported by the node itself
     models: list[str] = field(default_factory=list)  # Models available on this node
 
     @property
@@ -56,6 +57,7 @@ class Node:
             "role": self.role.value,
             "status": self.status.value,
             "address": self.address,
+            "advertised_address": self.advertised_address,
             "hardware": {
                 "hostname": self.hardware.hostname,
                 "os": f"{self.hardware.os_name} {self.hardware.os_version}",

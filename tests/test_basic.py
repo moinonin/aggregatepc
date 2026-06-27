@@ -190,6 +190,29 @@ class TestClusterFormation:
         workers = listener.monitor.get_all_workers()
         assert workers[0].node.models == ["llama3:latest", "mistral:7b"]
         assert workers[0].node.to_dict()["models"] == ["llama3:latest", "mistral:7b"]
+        assert workers[0].node.address == "127.0.0.1"
+        assert workers[0].node.advertised_address == "127.0.0.1"
+
+    def test_join_uses_udp_source_as_routable_address(self):
+        """Controller stores packet source address for routing and preserves advertised address."""
+        listener = HeartbeatListener(port=18906)
+        listener._socket = DummySocket()
+        node = make_node("multi-nic-worker")
+
+        msg = json.dumps({
+            "type": "join",
+            "node_id": node.node_id,
+            "hardware": node.to_dict()["hardware"],
+            "address": "192.168.100.31",
+            "models": ["qwen2.5-coder:7b"],
+        }).encode()
+        listener._handle_message(msg, ("192.168.1.31", 50000))
+
+        worker = listener.monitor.get_all_workers()[0].node
+        assert worker.address == "192.168.1.31"
+        assert worker.advertised_address == "192.168.100.31"
+        assert worker.to_dict()["address"] == "192.168.1.31"
+        assert worker.to_dict()["advertised_address"] == "192.168.100.31"
 
     def test_worker_join_sends_discovered_models(self, monkeypatch):
         """Worker sends discovered models in its initial join message."""
@@ -250,6 +273,7 @@ class TestClusterFormation:
         worker = listener.monitor.get_all_workers()[0].node
         assert worker.models == ["phi3:mini"]
         assert worker.to_dict()["models"] == ["phi3:mini"]
+        assert worker.address == "127.0.0.1"
 
     def test_status_query_replies_to_udp_source_address(self):
         """Controller status replies use the packet source, not advertised callback IP."""

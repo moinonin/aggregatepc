@@ -58,7 +58,9 @@ class HeartbeatMonitor:
         is_rejoin = node.node_id in self._workers
         if is_rejoin:
             logger.warning(f"Worker {node.node_id} already registered, refreshing")
-            self._workers[node.node_id].refresh()
+            state = self._workers[node.node_id]
+            state.node = node
+            state.refresh()
             return True
 
         self._workers[node.node_id] = WorkerState(node=node)
@@ -76,13 +78,15 @@ class HeartbeatMonitor:
             if self._on_leave:
                 self._on_leave(node)
 
-    def record_heartbeat(self, node_id: str, status: str, compute_score: float) -> None:
+    def record_heartbeat(self, node_id: str, status: str, compute_score: float, address: str | None = None) -> None:
         """Record an incoming heartbeat from a worker."""
         if node_id in self._workers:
             state = self._workers[node_id]
             state.refresh()
             state.node.status = NodeStatus(status)
             state.node.last_heartbeat = time.time()
+            if address:
+                state.node.address = address
 
     def heartbeat_timeout(self, timeout: float = HEARTBEAT_TIMEOUT_SECONDS) -> None:
         """Check for stale workers and mark them appropriately."""
@@ -147,7 +151,8 @@ class HeartbeatListener:
                     node_id=msg["node_id"],
                     role=NodeRole.WORKER,
                     hardware=_hardware_from_dict(msg.get("hardware", {})),
-                    address=msg.get("address", addr[0]),
+                    address=addr[0],
+                    advertised_address=msg.get("address"),
                     status=NodeStatus.IDLE,
                 )
                 # Attach discovered models to the node
@@ -168,6 +173,7 @@ class HeartbeatListener:
                     msg["node_id"],
                     msg.get("status", "idle"),
                     msg.get("compute_score", 0),
+                    addr[0],
                 )
 
             elif msg_type == "leave":
