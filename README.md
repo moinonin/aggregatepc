@@ -199,6 +199,57 @@ Verify Ollama is working:
 ollama version
 ```
 
+### Configure Ollama for network access
+
+Ollama binds to `127.0.0.1` (localhost) by default. For cluster inference,
+it must listen on all interfaces so other nodes can reach it.
+
+**macOS:**
+```bash
+# Set Ollama to listen on all interfaces
+launchctl setenv OLLAMA_HOST "0.0.0.0:11434"
+
+# Restart Ollama
+brew services restart ollama
+```
+
+**Linux:**
+```bash
+# Edit the Ollama service
+sudo systemctl edit ollama
+
+# Add these lines in the [Service] section:
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0:11434"
+
+# Restart
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+```
+
+**Firewall (if enabled):**
+
+Linux:
+```bash
+sudo ufw allow 11434/tcp
+```
+
+macOS:
+```bash
+# Check firewall status:
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate
+
+# If enabled, allow Ollama:
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /usr/local/bin/ollama
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp /usr/local/bin/ollama
+```
+
+Verify network access:
+```bash
+# From another machine on the network:
+curl http://<ollama-host-ip>:11434/api/tags
+```
+
 ### Install without packaging
 
 If you don't want to install, you can run directly:
