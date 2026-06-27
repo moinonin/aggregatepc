@@ -80,6 +80,36 @@ def start_llama_cpp_server(model_path: str, port: int = 8000) -> subprocess.Pope
         return None
 
 
+def start_vllm_server(model_path: str, port: int = 8000) -> subprocess.Popen:
+    """Start vLLM OpenAI-compatible server for a HuggingFace model."""
+    try:
+        process = subprocess.Popen(
+            ["python", "-m", "vllm.entrypoints.openai.api_server",
+             "--model", model_path, "--port", str(port), "--trust-remote-code"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # Wait for server to be ready
+        import socket
+        for _ in range(30):
+            time.sleep(1.0)
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(1.0)
+                    s.connect(("127.0.0.1", port))
+                    return process
+            except (OSError, ConnectionRefusedError):
+                continue
+            # Check if process died
+            if process.poll() is not None:
+                print("[aggregatepc] vLLM server failed to start")
+                return None
+        return process
+    except FileNotFoundError:
+        print("[aggregatepc] vLLM not installed. Install with: pip install vllm")
+        return None
+
+
 def main():
     print("[aggregatepc] Discovering best available model...")
 
@@ -160,6 +190,28 @@ def main():
                 process.terminate()
         else:
             print("[aggregatepc] Could not start llama.cpp server")
+            sys.exit(1)
+
+    elif best.model_type == "huggingface":
+        # Auto-start vLLM for HuggingFace models
+        print(f"[aggregatepc] Starting vLLM server for {best.name}...")
+        process = start_vllm_server(best.path)
+        if process:
+            print(f"[aggregatepc] vLLM serving {best.name} at http://localhost:8000")
+            print(f"[aggregatepc] API endpoint: http://localhost:8000/v1/chat/completions")
+            print()
+            print("[aggregatepc] Test with:")
+            print(f'  curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d \'{{"model":"{best.name}","messages":[{{"role":"user","content":"Hello"}}]}}\'')
+            print()
+            print("[aggregatepc] vLLM server is running. Press Ctrl+C to stop.")
+            try:
+                process.wait()
+            except KeyboardInterrupt:
+                process.terminate()
+        else:
+            print("[aggregatepc] Could not start vLLM server")
+            print("[aggregatepc] Install vLLM: pip install vllm")
+            print(f"[aggregatepc] Or start manually: python -m vllm.entrypoints.openai.api_server --model {best.path} --port 8000")
             sys.exit(1)
 
     else:
