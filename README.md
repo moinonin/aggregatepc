@@ -250,6 +250,17 @@ Verify network access:
 curl http://<ollama-host-ip>:11434/api/tags
 ```
 
+Expected response:
+```json
+{
+  "models": [
+    {"name": "model-name:latest", "size": 7162408368, ...}
+  ]
+}
+```
+
+If the connection times out, Ollama is not bound to all interfaces or the firewall is blocking it.
+
 ### Install without packaging
 
 If you don't want to install, you can run directly:
