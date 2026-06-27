@@ -96,49 +96,48 @@ def main():
         print("  export HF_HOME=/path/to/your/huggingface/cache")
         sys.exit(1)
 
+    # Always prefer Ollama models (already servable) over other types
+    from cluster.models.ollama import is_ollama_installed, list_ollama_models
+
+    ollama_available = is_ollama_installed()
+    ollama_models = list_ollama_models() if ollama_available else []
+
     best = get_best_model(models)
-    if not best:
+
+    # If we have running Ollama models, prefer those even if they're smaller
+    if ollama_models:
+        # Pick the largest Ollama model
+        best_ollama = ollama_models[0]  # list_ollama_models sorts by size desc
+        target_model_name = best_ollama["name"]
+        print(f"[aggregatepc] Best model: {target_model_name} (ollama)")
+        print(f"[aggregatepc]   Size: {best_ollama.get('size_gb', '?')}GB")
+    elif best:
+        target_model_name = best.name
+        print(f"[aggregatepc] Best model: {target_model_name}")
+        print(f"[aggregatepc]   Type: {best.model_type}")
+        print(f"[aggregatepc]   Size: {best.size_mb}MB")
+        print(f"[aggregatepc]   Path: {best.path}")
+    else:
         print("[aggregatepc] Could not determine best model")
         sys.exit(1)
 
-    print(f"[aggregatepc] Best model: {best.name}")
-    print(f"[aggregatepc]   Type: {best.model_type}")
-    print(f"[aggregatepc]   Size: {best.size_mb}MB")
-    print(f"[aggregatepc]   Path: {best.path}")
-
-    if best.model_type == "ollama":
+    if ollama_models or (best and best.model_type == "ollama"):
         # Start Ollama and the model
         if not start_ollama_server():
             print("[aggregatepc] Ollama not installed or could not start.")
             print("[aggregatepc] Install Ollama: https://ollama.com/download")
             sys.exit(1)
 
-        # Get valid model names from ollama list (more reliable than manifest parsing)
-        from cluster.models.ollama import list_ollama_models
-        ollama_models = list_ollama_models()
-        if ollama_models:
-            ollama_model_names = [m["name"] for m in ollama_models]
-            # Check if our best model name is in the list
-            if best.name in ollama_model_names:
-                target_model = best.name
-            else:
-                # Use the first available valid model
-                target_model = ollama_model_names[0]
-                print(f"[aggregatepc] Best model '{best.name}' not found in ollama, using '{target_model}'")
-        else:
-            # No models in ollama list — try the best name anyway
-            target_model = best.name
-
-        if not start_ollama_model(target_model):
-            print(f"[aggregatepc] Could not start model {target_model}")
-            print("[aggregatepc] Try: ollama pull phi3:mini")
+        if not start_ollama_model(target_model_name):
+            print(f"[aggregatepc] Could not start model {target_model_name}")
+            print("[aggregatepc] Try: ollama pull qwen2.5-coder:7b")
             sys.exit(1)
 
-        print(f"[aggregatepc] Ollama serving {target_model} at http://localhost:11434")
+        print(f"[aggregatepc] Ollama serving {target_model_name} at http://localhost:11434")
         print(f"[aggregatepc] API endpoint: http://localhost:11434/api/generate")
         print()
         print("[aggregatepc] Test with:")
-        print(f'  curl http://localhost:11434/api/generate -d \'{{"model":"{target_model}","prompt":"Hello","stream":false}}\'')
+        print(f'  curl http://localhost:11434/api/generate -d \'{{"model":"{target_model_name}","prompt":"Hello","stream":false}}\'')
         print()
         print("[aggregatepc] Ollama server is running. Press Ctrl+C to stop.")
 

@@ -103,6 +103,8 @@ def list_ollama_models() -> list[dict]:
                     "name": name,
                     "size_gb": size_gb,
                 })
+        # Sort by size descending (largest first)
+        models.sort(key=lambda m: m.get("size_gb", 0), reverse=True)
         return models
     except Exception as e:
         logger.error(f"Failed to list Ollama models: {e}")
