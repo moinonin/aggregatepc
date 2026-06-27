@@ -254,7 +254,8 @@ class ClusterProxy:
                 data = json.loads(resp.read().decode())
                 models = data.get("models", [])
                 return [m["name"] for m in models]
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Could not reach Ollama on {worker_address}:{ollama_port}: {e}")
             return None
 
     def get_status(self) -> dict:
