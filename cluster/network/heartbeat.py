@@ -175,8 +175,7 @@ class HeartbeatListener:
 
             elif msg_type == "status_query":
                 # Send back cluster status as JSON
-                if self._socket and "status_callback" in msg:
-                    callback_addr = (msg["status_callback"]["address"], msg["status_callback"]["port"])
+                if self._socket:
                     status = {
                         "workers": [
                             state.node.to_dict()
@@ -186,7 +185,7 @@ class HeartbeatListener:
                         "available_count": self._monitor.available_count,
                     }
                     resp = json.dumps(status).encode()
-                    self._socket.sendto(resp, callback_addr)
+                    self._socket.sendto(resp, addr)
 
         except (json.JSONDecodeError, KeyError) as e:
             logger.debug(f"Bad message from {addr}: {e}")

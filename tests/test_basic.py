@@ -251,6 +251,23 @@ class TestClusterFormation:
         assert worker.models == ["phi3:mini"]
         assert worker.to_dict()["models"] == ["phi3:mini"]
 
+    def test_status_query_replies_to_udp_source_address(self):
+        """Controller status replies use the packet source, not advertised callback IP."""
+        listener = HeartbeatListener(port=18905)
+        listener._socket = DummySocket()
+        listener.monitor.register(make_node("test-worker"))
+
+        msg = json.dumps({
+            "type": "status_query",
+            "status_callback": {"address": "10.255.255.1", "port": 9999},
+        }).encode()
+        listener._handle_message(msg, ("192.168.100.11", 45000))
+
+        data, addr = listener._socket.sent[0]
+        status = json.loads(data.decode())
+        assert addr == ("192.168.100.11", 45000)
+        assert status["worker_count"] == 1
+
 
 # --- Sprint 3: Task Queue ---
 
