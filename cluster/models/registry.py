@@ -225,6 +225,47 @@ def discover_all_models(extra_paths: list[str] | None = None) -> list[ModelInfo]
     return list(seen.values())
 
 
+def get_best_model(models: list[ModelInfo]) -> Optional[ModelInfo]:
+    """Select the best model from available models.
+
+    Selection criteria (in order of priority):
+    1. Prefer Ollama models (already served, fastest to use)
+    2. Prefer models that fit in available VRAM
+    3. Among those, prefer the largest model (most capable)
+
+    Returns None if no models are available.
+    """
+    if not models:
+        return None
+
+    # Check for Ollama models first (they're already running)
+    ollama_models = [m for m in models if m.model_type == "ollama"]
+    if ollama_models:
+        # Return the largest Ollama model
+        return max(ollama_models, key=lambda m: m.size_mb)
+
+    # Get available VRAM from hardware
+    try:
+        from cluster.detect import detect_hardware
+        hw = detect_hardware()
+        available_vram_mb = sum(g.vram_mb for g in hw.gpus if not g.is_integrated)
+        # If no discrete GPU, use system RAM as fallback (assume we can offload)
+        if available_vram_mb == 0:
+            available_vram_mb = hw.memory.total_mb
+    except Exception:
+        available_vram_mb = 0
+
+    # Filter models that fit in VRAM (with 1GB overhead for KV cache)
+    fitting_models = [m for m in models if m.size_mb + 1024 <= available_vram_mb]
+
+    if fitting_models:
+        # Return the largest model that fits
+        return max(fitting_models, key=lambda m: m.size_mb)
+
+    # If nothing fits VRAM, return the largest model anyway (CPU fallback)
+    return max(models, key=lambda m: m.size_mb)
+
+
 def get_model_summary(models: list[ModelInfo]) -> dict:
     """Get a summary of available models."""
     total_size_mb = sum(m.size_mb for m in models)
@@ -232,11 +273,14 @@ def get_model_summary(models: list[ModelInfo]) -> dict:
     for m in models:
         by_type[m.model_type] = by_type.get(m.model_type, 0) + 1
 
+    best = get_best_model(models)
+
     return {
         "total_models": len(models),
         "total_size_mb": total_size_mb,
         "total_size_gb": round(total_size_mb / 1024, 2),
         "by_type": by_type,
+        "best_model": best.to_dict() if best else None,
         "models": [m.to_dict() for m in models],
     }
 

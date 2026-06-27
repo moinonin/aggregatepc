@@ -103,6 +103,16 @@ def cmd_profile(args: argparse.Namespace) -> None:
     profile_main()
 
 
+def _get_local_ip() -> str:
+    """Get the local IP address."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     """Query cluster status from controller."""
     import json
@@ -113,20 +123,45 @@ def cmd_status(args: argparse.Namespace) -> None:
     controller_addr = args.controller or file_config.get("controller_ip", "127.0.0.1")
     # Status queries go to the controller's main port (8765), not a separate port
     port = args.port if args.port != 8765 else file_config.get("controller_port", 8765)
+    local_ip = _get_local_ip()
 
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.settimeout(5.0)
-            # Pick a random ephemeral port for the response
             s.bind(("", 0))
             callback_port = s.getsockname()[1]
             msg = json.dumps({
                 "type": "status_query",
-                "status_callback": {"address": "127.0.0.1", "port": callback_port},
+                "status_callback": {"address": local_ip, "port": callback_port},
             }).encode()
             s.sendto(msg, (controller_addr, port))
             data, _ = s.recvfrom(8192)
             status = json.loads(data.decode())
+
+            # Enhance output with cluster metrics
+            workers = status.get("workers", [])
+            if workers:
+                total_cores = sum(w.get("hardware", {}).get("cpu_cores", 0) for w in workers)
+                total_ram = sum(w.get("hardware", {}).get("ram_mb", 0) for w in workers)
+                total_vram = sum(
+                    sum(g.get("vram_mb", 0) for g in w.get("hardware", {}).get("gpus", []))
+                    for w in workers
+                )
+                all_models = set()
+                for w in workers:
+                    for m in w.get("models", []):
+                        all_models.add(m)
+
+                status["cluster_metrics"] = {
+                    "total_cpu_cores": total_cores,
+                    "total_ram_mb": total_ram,
+                    "total_ram_gb": round(total_ram / 1024, 1),
+                    "total_vram_mb": total_vram,
+                    "total_vram_gb": round(total_vram / 1024, 1),
+                    "total_models": len(all_models),
+                    "available_models": sorted(all_models),
+                }
+
             print(json.dumps(status, indent=2))
     except socket.timeout:
         print(f"[aggregatepc] No response from controller at {controller_addr}:{port}")

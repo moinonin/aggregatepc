@@ -218,7 +218,53 @@ class WorkerDaemon:
         )
         self._heartbeat_thread.start()
 
+        # Auto-start Ollama and serve best model
+        self._start_ollama_service()
+
         logger.info("Worker daemon started")
+
+    def _start_ollama_service(self) -> None:
+        """Start Ollama and load the best available model in a background thread."""
+        def _ollama_setup():
+            try:
+                from cluster.models.ollama import (
+                    is_ollama_installed,
+                    start_ollama_serve,
+                    get_best_ollama_model,
+                    ensure_model_available,
+                )
+                from cluster.models.registry import discover_all_models, get_best_model
+
+                if not is_ollama_installed():
+                    logger.info("Ollama not installed — skipping model serving")
+                    return
+
+                # Start Ollama server
+                if not start_ollama_serve():
+                    logger.warning("Could not start Ollama server")
+                    return
+
+                # Check for best model (Ollama first, then others)
+                all_models = discover_all_models()
+                best = get_best_model(all_models)
+                if best:
+                    if best.model_type == "ollama":
+                        logger.info(f"Best model (ollama): {best.name}")
+                    else:
+                        # Try to find an Ollama version of the best model
+                        ollama_best = get_best_ollama_model()
+                        if ollama_best:
+                            logger.info(f"Best model (ollama): {ollama_best}")
+                        else:
+                            logger.info(f"Best model: {best.name} (type: {best.model_type})")
+                else:
+                    logger.info("No models found locally")
+
+            except Exception as e:
+                logger.debug(f"Ollama setup error: {e}")
+
+        thread = threading.Thread(target=_ollama_setup, daemon=True)
+        thread.start()
 
     def stop(self) -> None:
         """Stop the worker daemon."""
