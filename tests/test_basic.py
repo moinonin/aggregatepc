@@ -232,7 +232,9 @@ class TestScheduler:
         assert assignment.status == "assigned"
         assert assignment.node_id == "n2"  # Tight fit prefers 6GB over 12GB
 
-        # Large task (8GB VRAM) — only n1 has enough
+        # Large task (8GB VRAM) — n1 has 12GB, n2 has 6GB
+        # With tight-fit scoring, n1 (12GB) is preferred for 8GB task
+        # because n2 (6GB) can't fit it
         task2 = Task(
             task_id="t2", task_type="llm_inference",
             priority=Priority.HIGH, required_ram_mb=16384,

@@ -4,16 +4,16 @@
 
 ---
 
-## Sprint 1: Core Infrastructure & Auto-Detection
+## Sprint 1: Core Infrastructure & Auto-Detection ✅
 
 ### Objective
 Enable automatic detection and profiling of local hardware resources without manual configuration.
 
-### Tasks
-- [ ] `cluster/detect.py` - Auto-detect CPU cores, RAM, GPU models, and VRAM across platforms
-- [ ] `cluster/network/discovery.py` - Automatic local network discovery using mDNS/SSDP
-- [ ] `scripts/auto_profile.py` - One-click hardware and network profiling script
-- [ ] `cluster/nodes/__init__.py` - Node abstraction layer (Windows, Linux, macOS)
+### Completed
+- [x] `cluster/detect.py` - Auto-detect CPU cores, RAM, GPU models, and VRAM across platforms
+- [x] `cluster/network/discovery.py` - Automatic local network discovery using mDNS/SSDP
+- [x] `scripts/auto_profile.py` - One-click hardware and network profiling script
+- [x] `cluster/nodes/__init__.py` - Node abstraction layer (Windows, Linux, macOS)
 
 ### Platform-Specific Handling
 - Windows: WMI queries for CPU/GPU, psutil for memory
@@ -22,34 +22,34 @@ Enable automatic detection and profiling of local hardware resources without man
 
 ---
 
-## Sprint 2: Cluster Formation & Bootstrap
+## Sprint 2: Cluster Formation & Bootstrap ✅
 
 ### Objective
 Create a zero-config cluster formation process where users can claim "worker" status on their machines.
 
-### Tasks
-- [ ] `cluster/nodes/worker.py` - Lightweight worker daemon for idle PCs
-- [ ] `cluster/nodes/controller.py` - Controller that aggregates workers
-- [ ] `scripts/start_worker.py` - Simple script to turn any PC into a worker
-- [ ] `cluster/network/heartbeat.py` - Worker health monitoring and auto-reconnect
-- [ ] CLI: `aggregatepc worker --idle-threshold=10%` - Auto-start when PC is idle
+### Completed
+- [x] `cluster/nodes/worker.py` - Lightweight worker daemon for idle PCs
+- [x] `cluster/nodes/controller.py` - Controller that aggregates workers
+- [x] `scripts/start_worker.py` - Simple script to turn any PC into a worker
+- [x] `cluster/network/heartbeat.py` - Worker health monitoring and auto-reconnect
+- [x] CLI: `aggregatepc worker` - Auto-start when PC is idle
 
 ### User Story
-> Users run `./start_worker.sh` on their old laptops/desktops. The script auto-detects hardware, joins the local network cluster, and waits for tasks.
+> Users run `aggregatepc worker` on their old laptops/desktops. The script auto-detects hardware, joins the local network cluster, and waits for tasks.
 
 ---
 
-## Sprint 3: Task Distribution & Load Balancing
+## Sprint 3: Task Distribution & Load Balancing ✅
 
 ### Objective
 Intelligently distribute compute tasks across heterogeneous nodes based on their capabilities.
 
-### Tasks
-- [ ] `cluster/compute/scheduler.py` - Capability-based task assignment
-- [ ] `cluster/compute/task_queue.py` - Priority queue with resource requirements
-- [ ] `cluster/compute/gpu_allocator.py` - VRAM-aware model placement
-- [ ] `cluster/tasks/llm_inference.py` - LLM inference task type
-- [ ] `cluster/tasks/batch_compute.py` - General batch processing task type
+### Completed
+- [x] `cluster/compute/scheduler.py` - Capability-based task assignment
+- [x] `cluster/compute/task_queue.py` - Priority queue with resource requirements
+- [x] `cluster/compute/gpu_allocator.py` - VRAM-aware model placement
+- [x] `cluster/tasks/llm_inference.py` - LLM inference task type
+- [x] `cluster/tasks/batch_compute.py` - General batch processing task type
 
 ### Key Features
 - Auto-split large models across nodes with available VRAM
@@ -58,32 +58,66 @@ Intelligently distribute compute tasks across heterogeneous nodes based on their
 
 ---
 
-## Sprint 4: User-Friendly Control Interface
+## Sprint 4: Configuration, CLI & Packaging ✅
 
 ### Objective
-Provide simple interfaces for non-technical users to contribute their PC's idle resources.
+Provide a unified CLI, config file support, and installable packaging.
 
-### Tasks
-- [ ] `cluster/cli/__init__.py` - Unified CLI with intuitive commands
-- [ ] `cluster/gui/app.py` - Optional simple GUI showing contribution stats
-- [ ] `cluster/contrib/dashboard.py` - Web dashboard showing cluster status
-- [ ] `scripts/aggregatepc.py` - Main entry point: `python aggregatepc.py start`
+### Completed
+- [x] `aggregatepc.py` - Unified CLI with controller/worker/profile/status commands
+- [x] `cluster/config.py` - Config file loader (configs/cluster.conf)
+- [x] `configs/cluster.conf` - IP addresses and ports
+- [x] `Makefile` - Build targets (help, controller, worker, profile, status, test, clean)
+- [x] `pyproject.toml` - pip install -e . support
+- [x] `.gitignore` - Proper exclusions
+- [x] `README.md` - Comprehensive documentation with code snippets
 
-### CLI Examples
-```bash
-# Join your PC to the cluster
-aggregatepc worker start
-
-# See what your PC contributed this month
-aggregatepc stats
-
-# Temporarily pause when you need your PC
-aggregatepc worker pause
-```
+### Config Resolution Order
+1. CLI flags (highest priority)
+2. Config file (configs/cluster.conf)
+3. Auto-discovery (mDNS scan)
+4. Defaults (127.0.0.1:8765)
 
 ---
 
-## Sprint 5: Production Hardening & Community Release
+## Sprint 5: Model Discovery & Ollama Integration ✅
+
+### Objective
+Discover models already pulled on each node and auto-serve them via Ollama.
+
+### Completed
+- [x] `cluster/models/registry.py` - Discovers HF cache, Ollama, llama.cpp models
+- [x] `cluster/models/ollama.py` - Full Ollama integration (detect, start, pull, list)
+- [x] `cluster/nodes/__init__.py` - Added `models` field to Node dataclass
+- [x] Worker advertises models on join
+- [x] Controller prints model list in join notification
+- [x] `get_best_model()` - Selects largest model fitting VRAM (prefers Ollama)
+- [x] Worker auto-starts Ollama in background on startup
+
+---
+
+## Sprint 6: Decentralized Compute (Current)
+
+### Objective
+Enable true distributed compute by splitting models across nodes and falling back gracefully.
+
+### Tasks
+- [x] Split model placement across multiple GPUs/nodes
+- [x] CPU offload fallback when VRAM insufficient
+- [x] Task retry queue with exponential backoff
+- [ ] Pipeline parallelism (layer-by-layer inference across nodes)
+- [ ] Active model pulling on demand (controller triggers pull)
+- [ ] Worker-to-worker communication for split inference
+
+### Key Features
+- **Split Placement**: When no single node has enough VRAM, the allocator distributes the model across multiple GPUs
+- **CPU Fallback**: Models too large for GPU can run on CPU (slower but functional)
+- **Retry Queue**: Tasks that can't be scheduled immediately are queued and retried with exponential backoff
+- **Graceful Degradation**: Cluster remains useful even with limited resources
+
+---
+
+## Sprint 7: Production Hardening & Community Release
 
 ### Objective
 Make the system stable for everyday use and easy for others to set up.
@@ -92,6 +126,7 @@ Make the system stable for everyday use and easy for others to set up.
 - [ ] Cross-platform installer script
 - [ ] Auto-update mechanism for workers
 - [ ] Security: encrypted task communication, token authentication
+- [ ] Web dashboard for cluster monitoring
 - [ ] Documentation: "Set up your old laptop in 5 minutes or less"
 - [ ] Example configs for common use cases (LLM inference, video encoding, etc.)
 
@@ -104,3 +139,4 @@ Make the system stable for everyday use and easy for others to set up.
 3. **Any PC Works** - Support Windows 10+, Linux, macOS with any hardware configuration
 4. **No Cloud Required** - Everything runs on local network, no external dependencies
 5. **Plug & Play** - Auto-discovery and zero-config setup whenever possible
+6. **Decentralized Compute** - Models and tasks should be distributed across all available nodes
