@@ -191,17 +191,19 @@ class ClusterProxy:
 
     def _query_controller_status(self, controller_port: int) -> Optional[dict]:
         """Query the controller's status to get worker info."""
+        config = load_config()
+        controller_ip = config.get("controller_ip", "127.0.0.1")
+        callback_port = controller_port + 50
+
         try:
-            # Controller responds to status_query messages
             msg = json.dumps({
                 "type": "status_query",
-                "status_callback": {"address": "127.0.0.1", "port": controller_port + 50}
+                "status_callback": {"address": "127.0.0.1", "port": callback_port}
             }).encode()
 
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                 s.settimeout(5.0)
-                # Send to localhost (proxy runs on controller or worker)
-                s.sendto(msg, ("127.0.0.1", controller_port))
+                s.sendto(msg, (controller_ip, controller_port))
                 data, _ = s.recvfrom(8192)
                 return json.loads(data.decode())
         except Exception as e:
