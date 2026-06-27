@@ -1,0 +1,276 @@
+"""Lightweight worker daemon for idle PCs.
+
+Runs on each contributing machine, monitors system usage, and only accepts
+compute tasks when the machine is idle (user not actively using it).
+"""
+
+import json
+import logging
+import os
+import socket
+import subprocess
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Optional
+
+from cluster.detect import detect_hardware
+from cluster.nodes import Node, NodeRole, NodeStatus
+
+logger = logging.getLogger("aggregatepc.worker")
+
+
+@dataclass
+class IdleThreshold:
+    """Configuration for when a machine is considered 'idle' and available."""
+    cpu_percent_max: float = 25.0       # CPU usage must be below this
+    memory_percent_max: float = 75.0    # Memory usage must be below this
+    check_interval_seconds: float = 5.0 # How often to check
+    idle_duration_seconds: float = 30.0 # Must be idle this long before accepting work
+
+
+@dataclass
+class WorkerConfig:
+    worker: IdleThreshold = field(default_factory=IdleThreshold)
+    controller_port: int = 8765
+    heartbeat_interval_seconds: float = 10.0
+    advertise_on_network: bool = True
+
+
+def _get_cpu_usage() -> float:
+    """Get current CPU usage percentage (0-100)."""
+    try:
+        if os.name == "posix":
+            # Quick POSIX CPU usage from /proc/stat
+            with open("/proc/stat", "r") as f:
+                line = f.readline()
+            fields = line.split()
+            idle = int(fields[4])
+            total = sum(int(x) for x in fields[1:])
+            return (1 - idle / total) * 100 if total > 0 else 0.0
+        else:
+            # Fallback: use psutil if available
+            import psutil
+            return psutil.cpu_percent(interval=0.5)
+    except Exception:
+        return 100.0  # Assume busy if we can't measure
+
+
+def _get_memory_usage() -> float:
+    """Get current memory usage percentage (0-100)."""
+    try:
+        if os.name == "posix" and os.path.exists("/proc/meminfo"):
+            meminfo = {}
+            with open("/proc/meminfo", "r") as f:
+                for line in f:
+                    parts = line.split(":")
+                    if len(parts) == 2:
+                        val = parts[1].strip().split()[0]
+                        meminfo[parts[0].strip()] = int(val)
+            total = meminfo.get("MemTotal", 0)
+            available = meminfo.get("MemAvailable", 0)
+            if total > 0:
+                return (1 - available / total) * 100
+        else:
+            import psutil
+            return psutil.virtual_memory().percent
+    except Exception:
+        return 100.0
+    return 0.0
+
+
+def _is_idle(config: IdleThreshold) -> bool:
+    """Check if the machine is currently idle based on thresholds."""
+    cpu = _get_cpu_usage()
+    mem = _get_memory_usage()
+    return cpu < config.cpu_percent_max and mem < config.memory_percent_max
+
+
+class WorkerDaemon:
+    """Lightweight daemon that contributes compute when the PC is idle."""
+
+    def __init__(self, config: Optional[WorkerConfig] = None):
+        self.config = config or WorkerConfig()
+        self.node = self._build_node()
+        self._running = False
+        self._idle_since: Optional[float] = None
+        self._heartbeat_thread: Optional[threading.Thread] = None
+        self._idle_monitor_thread: Optional[threading.Thread] = None
+        self._controller_address: Optional[str] = None
+
+    @property
+    def is_available(self) -> bool:
+        return self.node.status in (NodeStatus.ONLINE, NodeStatus.IDLE)
+
+    @staticmethod
+    def _build_node() -> Node:
+        """Create a Node representing this worker using auto-detected hardware."""
+        hardware = detect_hardware()
+        return Node(
+            node_id=hardware.hostname,
+            role=NodeRole.WORKER,
+            hardware=hardware,
+            status=NodeStatus.IDLE,
+        )
+
+    def _heartbeat_loop(self) -> None:
+        """Periodically send heartbeat to controller."""
+        while self._running:
+            if self._controller_address:
+                self._send_heartbeat()
+            time.sleep(self.config.heartbeat_interval_seconds)
+
+    def _idle_monitor_loop(self) -> None:
+        """Monitor system usage and update availability status."""
+        while self._running:
+            currently_idle = _is_idle(self.config.worker)
+
+            if currently_idle:
+                if self._idle_since is None:
+                    self._idle_since = time.time()
+                    logger.info("Machine entered idle state")
+
+                elapsed = time.time() - self._idle_since
+                if elapsed >= self.config.worker.idle_duration_seconds:
+                    if self.node.status != NodeStatus.IDLE:
+                        self.node.status = NodeStatus.IDLE
+                        logger.info("Machine confirmed idle — available for tasks")
+            else:
+                if self._idle_since is not None:
+                    logger.info("Machine no longer idle (user active)")
+                self._idle_since = None
+                if self.node.status != NodeStatus.BUSY:
+                    self.node.status = NodeStatus.BUSY
+
+            time.sleep(self.config.worker.check_interval_seconds)
+
+    def _send_heartbeat(self) -> None:
+        """Send heartbeat message to the controller."""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.settimeout(2.0)
+                msg = json.dumps({
+                    "type": "heartbeat",
+                    "node_id": self.node.node_id,
+                    "status": self.node.status.value,
+                    "compute_score": self.node.compute_score,
+                    "address": self._get_local_ip(),
+                }).encode()
+                s.sendto(msg, (self._controller_address, self.config.controller_port))
+        except Exception as e:
+            logger.debug(f"Heartbeat send failed: {e}")
+
+    def _get_local_ip(self) -> str:
+        """Get local IP address."""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                return s.getsockname()[0]
+        except OSError:
+            return "127.0.0.1"
+
+    def join(self, controller_address: str) -> bool:
+        """Join a cluster by contacting the controller."""
+        self._controller_address = controller_address
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.settimeout(5.0)
+                msg = json.dumps({
+                    "type": "join",
+                    "node_id": self.node.node_id,
+                    "hardware": self.node.to_dict()["hardware"],
+                    "address": self._get_local_ip(),
+                }).encode()
+                s.sendto(msg, (controller_address, self.config.controller_port))
+
+                # Wait for acknowledgment
+                data, _ = s.recvfrom(1024)
+                response = json.loads(data.decode())
+                return response.get("status") == "accepted"
+        except Exception as e:
+            logger.error(f"Failed to join cluster: {e}")
+            return False
+
+    def start(self) -> None:
+        """Start the worker daemon."""
+        self._running = True
+        logger.info(f"Starting worker {self.node.node_id}")
+
+        # Start idle monitor thread
+        self._idle_monitor_thread = threading.Thread(
+            target=self._idle_monitor_loop, daemon=True
+        )
+        self._idle_monitor_thread.start()
+
+        # Start heartbeat thread
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop, daemon=True
+        )
+        self._heartbeat_thread.start()
+
+        logger.info("Worker daemon started")
+
+    def stop(self) -> None:
+        """Stop the worker daemon."""
+        self._running = False
+        self.node.status = NodeStatus.OFFLINE
+        if self._heartbeat_thread:
+            self._heartbeat_thread.join(timeout=5.0)
+        if self._idle_monitor_thread:
+            self._idle_monitor_thread.join(timeout=5.0)
+        logger.info("Worker daemon stopped")
+
+    def run_forever(self) -> None:
+        """Run the worker until interrupted."""
+        self.start()
+        try:
+            while self._running:
+                time.sleep(1.0)
+        except KeyboardInterrupt:
+            logger.info("Interrupted — shutting down")
+        finally:
+            self.stop()
+
+
+def create_worker_node() -> Node:
+    """Create a worker Node for this machine."""
+    hardware = detect_hardware()
+    return Node(
+        node_id=hardware.hostname,
+        role=NodeRole.WORKER,
+        hardware=hardware,
+        status=NodeStatus.IDLE,
+    )
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
+    import argparse
+
+    parser = argparse.ArgumentParser(description="AggregatePC Worker Daemon")
+    parser.add_argument("--controller", type=str, default=None, help="Controller IP address")
+    parser.add_argument("--controller-port", type=int, default=8765, help="Controller UDP port (default: 8765)")
+    parser.add_argument("--cpu-threshold", type=float, default=25.0, help="Max CPU %% to be considered idle")
+    parser.add_argument("--mem-threshold", type=float, default=75.0, help="Max memory %% to be considered idle")
+    parser.add_argument("--idle-duration", type=float, default=30.0, help="Seconds of idle before accepting work")
+    args = parser.parse_args()
+
+    config = WorkerConfig(
+        controller_port=args.controller_port,
+        worker=IdleThreshold(
+            cpu_percent_max=args.cpu_threshold,
+            memory_percent_max=args.mem_threshold,
+            idle_duration_seconds=args.idle_duration,
+        )
+    )
+
+    daemon = WorkerDaemon(config=config)
+
+    if args.controller:
+        if daemon.join(args.controller):
+            print(f"Joined controller at {args.controller}")
+        else:
+            print("Failed to joining controller")
+            exit(1)
+
+    daemon.run_forever()
