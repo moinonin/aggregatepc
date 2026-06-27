@@ -139,38 +139,111 @@ def discover_ollama_models() -> list[ModelInfo]:
             ["ollama", "list"],
             capture_output=True, text=True, timeout=30,
         )
-        if result.returncode != 0:
-            return models
+        if result.returncode == 0:
+            for line in result.stdout.strip().splitlines():
+                parts = line.split()
+                if len(parts) < 2 or parts[0] == "NAME":
+                    continue
+                name = parts[0]
+                # Parse size
+                size_mb = 0
+                for i, part in enumerate(parts):
+                    if part in ("GB", "MB") and i > 0:
+                        try:
+                            size_val = float(parts[i - 1])
+                            if part == "GB":
+                                size_mb = int(size_val * 1024)
+                            elif part == "MB":
+                                size_mb = int(size_val)
+                        except (ValueError, IndexError):
+                            pass
+                        break
 
-        for line in result.stdout.strip().splitlines():
-            parts = line.split()
-            if len(parts) < 2 or parts[0] == "NAME":
-                continue
-            name = parts[0]
-            # Parse size
-            size_mb = 0
-            for i, part in enumerate(parts):
-                if part in ("GB", "MB") and i > 0:
-                    try:
-                        size_val = float(parts[i - 1])
-                        if part == "GB":
-                            size_mb = int(size_val * 1024)
-                        elif part == "MB":
-                            size_mb = int(size_val)
-                    except (ValueError, IndexError):
-                        pass
-                    break
-
-            models.append(ModelInfo(
-                name=name,
-                path=f"ollama://{name}",
-                size_mb=max(size_mb, 1),
-                model_type="ollama",
-            ))
+                models.append(ModelInfo(
+                    name=name,
+                    path=f"ollama://{name}",
+                    size_mb=max(size_mb, 1),
+                    model_type="ollama",
+                ))
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
+    manifest_models = _discover_ollama_manifest_models()
+    seen = {model.name.lower(): model for model in models}
+    for model in manifest_models:
+        if model.name.lower() not in seen:
+            models.append(model)
+
     return models
+
+
+def _discover_ollama_manifest_models() -> list[ModelInfo]:
+    """Discover Ollama models from local manifests when the daemon is offline."""
+    models: list[ModelInfo] = []
+    models_root = os.environ.get("OLLAMA_MODELS", os.path.expanduser("~/.ollama/models"))
+    manifests_root = os.path.join(models_root, "manifests")
+    blobs_root = os.path.join(models_root, "blobs")
+
+    if not os.path.isdir(manifests_root):
+        return models
+
+    for root, _, files in os.walk(manifests_root):
+        for filename in files:
+            manifest_path = os.path.join(root, filename)
+            model_name = _ollama_name_from_manifest_path(manifests_root, manifest_path)
+            if not model_name:
+                continue
+
+            size_mb = _ollama_manifest_size_mb(manifest_path, blobs_root)
+            name, parameters, quantization = _parse_model_name(model_name)
+            models.append(ModelInfo(
+                name=name,
+                path=f"ollama://{model_name}",
+                size_mb=size_mb,
+                model_type="ollama",
+                parameters=parameters,
+                quantization=quantization,
+            ))
+
+    return models
+
+
+def _ollama_name_from_manifest_path(manifests_root: str, manifest_path: str) -> str:
+    """Convert an Ollama manifest path into a model tag like llama3:latest."""
+    rel_parts = Path(os.path.relpath(manifest_path, manifests_root)).parts
+    if len(rel_parts) < 3:
+        return ""
+
+    tag = rel_parts[-1]
+    model = rel_parts[-2]
+    namespace = rel_parts[-3]
+    if namespace == "library":
+        return f"{model}:{tag}"
+    return f"{namespace}/{model}:{tag}"
+
+
+def _ollama_manifest_size_mb(manifest_path: str, blobs_root: str) -> int:
+    """Calculate model size from manifest layers, falling back to file size."""
+    try:
+        with open(manifest_path, "r") as f:
+            manifest = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return 1
+
+    total = 0
+    for layer in manifest.get("layers", []):
+        digest = layer.get("digest", "")
+        if not digest:
+            continue
+
+        blob_name = digest.replace(":", "-")
+        blob_path = os.path.join(blobs_root, blob_name)
+        if os.path.isfile(blob_path):
+            total += os.path.getsize(blob_path)
+        else:
+            total += int(layer.get("size", 0) or 0)
+
+    return max(total // (1024 * 1024), 1)
 
 
 def discover_llama_cpp_models(paths: list[str] | None = None) -> list[ModelInfo]:

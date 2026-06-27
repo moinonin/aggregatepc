@@ -111,6 +111,16 @@ class WorkerDaemon:
             status=NodeStatus.IDLE,
         )
 
+    @staticmethod
+    def _discover_model_names() -> list[str]:
+        """Discover local model names without requiring the worker daemon loop."""
+        try:
+            from cluster.models.registry import discover_all_models
+            return sorted({model.name for model in discover_all_models()})
+        except Exception as e:
+            logger.debug(f"Model discovery failed: {e}")
+            return []
+
     def _heartbeat_loop(self) -> None:
         """Periodically send heartbeat to controller."""
         while self._running:
@@ -171,6 +181,7 @@ class WorkerDaemon:
     def join(self, controller_address: str) -> bool:
         """Join a cluster by contacting the controller."""
         self._controller_address = controller_address
+        self.node.models = self._discover_model_names()
 
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -180,7 +191,7 @@ class WorkerDaemon:
                     "node_id": self.node.node_id,
                     "hardware": self.node.to_dict()["hardware"],
                     "address": self._get_local_ip(),
-                    "models": [],  # Will be updated after Ollama starts
+                    "models": self.node.models,
                 }).encode()
                 s.sendto(msg, (controller_address, self.config.controller_port))
 

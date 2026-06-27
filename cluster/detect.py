@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import platform
 import subprocess
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -75,11 +76,12 @@ def detect_cpu() -> CPUInfo:
     system = platform.system()
     cpu_name = platform.processor() or "Unknown"
     arch = platform.machine()
+    detected_cores = os.cpu_count() or 1
+    cores_physical = detected_cores
+    cores_logical = detected_cores
 
     if system == "Windows":
         out = _run(["wmic", "cpu", "get", "Name,NumberOfCores,NumberOfLogicalProcessors", "/format:csv"])
-        cores_physical = 0
-        cores_logical = 0
         for line in out.splitlines():
             parts = line.split(",")
             if len(parts) >= 4 and parts[1].strip():
@@ -89,9 +91,6 @@ def detect_cpu() -> CPUInfo:
                     cores_logical = int(parts[3].strip())
                 except ValueError:
                     pass
-        if cores_physical == 0:
-            cores_physical = 1
-            cores_logical = 1
 
     elif system == "Linux":
         lscpu = _run(["lscpu"])
@@ -103,8 +102,6 @@ def detect_cpu() -> CPUInfo:
                     cores_logical = int(line.split(":", 1)[1].strip())
                 except ValueError:
                     pass
-        if cores_logical == 0:
-            cores_logical = 1
         cores_physical = cores_logical  # Simplified; could parse Core(s) per socket
 
     elif system == "Darwin":
@@ -150,8 +147,11 @@ def detect_memory() -> MemoryInfo:
                     pass
 
     elif system == "Linux":
-        with open("/proc/meminfo", "r") as f:
-            meminfo = f.read()
+        try:
+            with open("/proc/meminfo", "r") as f:
+                meminfo = f.read()
+        except OSError:
+            meminfo = ""
         for line in meminfo.splitlines():
             if line.startswith("MemTotal:"):
                 try:
@@ -188,7 +188,22 @@ def detect_memory() -> MemoryInfo:
                     pass
         available_mb = (free_pages * page_size) // (1024 * 1024)
 
+    if total_mb <= 0:
+        total_mb = _detect_total_memory_mb()
+    if available_mb <= 0:
+        available_mb = total_mb
+
     return MemoryInfo(total_mb=total_mb, available_mb=available_mb)
+
+
+def _detect_total_memory_mb() -> int:
+    """Best-effort total system memory fallback using POSIX sysconf."""
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        page_count = os.sysconf("SC_PHYS_PAGES")
+        return max((page_size * page_count) // (1024 * 1024), 1)
+    except (AttributeError, OSError, ValueError):
+        return 1
 
 
 def detect_gpus() -> list[GPUInfo]:

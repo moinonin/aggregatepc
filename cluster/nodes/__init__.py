@@ -69,6 +69,7 @@ class Node:
             },
             "compute_score": round(self.compute_score, 2),
             "last_heartbeat": self.last_heartbeat,
+            "models": list(self.models),
         }
 
 

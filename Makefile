@@ -40,7 +40,7 @@ profile: ## Profile hardware and optionally scan network
 status: ## Show cluster status (optionally set CONTROLLER=<IP> PORT=<PORT>)
 	python3 aggregatepc.py status --controller $(or $(CONTROLLER),127.0.0.1) --port $(or $(PORT),8765)
 
-inference: ## Select best model across cluster and broadcast to workers
+inference: ## Start inference proxy - routes requests to best cluster model
 	python3 scripts/start_inference.py --broadcast
 
 test: ## Run tests

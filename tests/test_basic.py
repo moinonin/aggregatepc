@@ -40,6 +40,33 @@ def make_node(node_id, cpu_cores=8, ram_mb=16384, vram_mb=12288, integrated=Fals
     )
 
 
+class DummySocket:
+    def __init__(self):
+        self.sent = []
+
+    def sendto(self, data, addr):
+        self.sent.append((data, addr))
+
+
+class JoinSocket:
+    sent = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def settimeout(self, timeout):
+        self.timeout = timeout
+
+    def sendto(self, data, addr):
+        self.sent.append((data, addr))
+
+    def recvfrom(self, size):
+        return json.dumps({"status": "accepted"}).encode(), ("127.0.0.1", 8765)
+
+
 # --- Sprint 1: Hardware Detection ---
 
 class TestHardwareDetection:
@@ -62,6 +89,11 @@ class TestHardwareDetection:
         node = create_local_node(NodeRole.WORKER)
         assert node.role == NodeRole.WORKER
         assert node.hardware.cpu.cores_logical > 0
+
+    def test_node_to_dict_includes_models(self):
+        node = make_node("model-worker")
+        node.models = ["llama3:latest"]
+        assert node.to_dict()["models"] == ["llama3:latest"]
 
 
 # --- Sprint 1: Network Discovery ---
@@ -106,6 +138,45 @@ class TestClusterFormation:
 
         controller._heartbeat_listener.stop()
 
+    def test_join_message_registers_models(self):
+        """Controller stores models included in a worker join message."""
+        listener = HeartbeatListener(port=18902)
+        listener._socket = DummySocket()
+        node = make_node("model-worker")
+
+        msg = json.dumps({
+            "type": "join",
+            "node_id": node.node_id,
+            "hardware": node.to_dict()["hardware"],
+            "address": "127.0.0.1",
+            "models": ["llama3:latest", "mistral:7b"],
+        }).encode()
+        listener._handle_message(msg, ("127.0.0.1", 50000))
+
+        workers = listener.monitor.get_all_workers()
+        assert workers[0].node.models == ["llama3:latest", "mistral:7b"]
+        assert workers[0].node.to_dict()["models"] == ["llama3:latest", "mistral:7b"]
+
+    def test_worker_join_sends_discovered_models(self, monkeypatch):
+        """Worker sends discovered models in its initial join message."""
+        import cluster.nodes.worker as worker_module
+
+        JoinSocket.sent = []
+        monkeypatch.setattr(
+            WorkerDaemon,
+            "_discover_model_names",
+            staticmethod(lambda: ["llama3:latest"]),
+        )
+        monkeypatch.setattr(WorkerDaemon, "_get_local_ip", lambda self: "127.0.0.1")
+        monkeypatch.setattr(worker_module.socket, "socket", lambda *args, **kwargs: JoinSocket())
+
+        config = WorkerConfig(controller_port=18904, worker=IdleThreshold(idle_duration_seconds=0))
+        daemon = WorkerDaemon(config=config)
+
+        assert daemon.join("127.0.0.1") is True
+        payload = json.loads(JoinSocket.sent[0][0].decode())
+        assert payload["models"] == ["llama3:latest"]
+
     def test_worker_heartbeat(self):
         """Worker sends heartbeat and controller tracks it."""
         listener = HeartbeatListener(port=18901)
@@ -126,6 +197,25 @@ class TestClusterFormation:
         time.sleep(0.5)
         assert listener.monitor.worker_count == 0  # heartbeat without join doesn't register
         listener.stop()
+
+    def test_heartbeat_updates_registered_worker_models(self):
+        """Controller keeps model updates received after join."""
+        listener = HeartbeatListener(port=18903)
+        listener.monitor.register(make_node("test-worker"))
+
+        msg = json.dumps({
+            "type": "heartbeat",
+            "node_id": "test-worker",
+            "status": "idle",
+            "compute_score": 100.0,
+            "address": "127.0.0.1",
+            "models": ["phi3:mini"],
+        }).encode()
+        listener._handle_message(msg, ("127.0.0.1", 50000))
+
+        worker = listener.monitor.get_all_workers()[0].node
+        assert worker.models == ["phi3:mini"]
+        assert worker.to_dict()["models"] == ["phi3:mini"]
 
 
 # --- Sprint 3: Task Queue ---
@@ -348,6 +438,30 @@ class TestModelDiscovery:
         assert "total_models" in summary
         assert "total_size_mb" in summary
         assert "by_type" in summary
+
+    def test_ollama_manifest_discovery_without_daemon(self, tmp_path, monkeypatch):
+        from cluster.models import registry
+
+        models_root = tmp_path / "ollama" / "models"
+        manifest_dir = models_root / "manifests" / "registry.ollama.ai" / "library" / "phi3"
+        blob_dir = models_root / "blobs"
+        manifest_dir.mkdir(parents=True)
+        blob_dir.mkdir(parents=True)
+        (blob_dir / "sha256-test").write_bytes(b"0" * 2048)
+        (manifest_dir / "mini").write_text(json.dumps({
+            "layers": [{"digest": "sha256:test", "size": 2048}],
+        }))
+
+        class FailedOllamaList:
+            returncode = 1
+            stdout = ""
+
+        monkeypatch.setenv("OLLAMA_MODELS", str(models_root))
+        monkeypatch.setattr(registry.subprocess, "run", lambda *args, **kwargs: FailedOllamaList())
+
+        models = registry.discover_ollama_models()
+        assert [model.name for model in models] == ["phi3:mini"]
+        assert models[0].model_type == "ollama"
 
 
 if __name__ == "__main__":
