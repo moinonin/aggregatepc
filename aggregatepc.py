@@ -105,6 +105,7 @@ def cmd_profile(args: argparse.Namespace) -> None:
 
 def _get_local_ip() -> str:
     """Get the local IP address."""
+    import socket
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
