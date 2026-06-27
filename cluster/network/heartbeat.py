@@ -165,12 +165,23 @@ class HeartbeatListener:
 
             elif msg_type == "heartbeat":
                 # Update models if sent in heartbeat
+                node_id = msg["node_id"]
+                if node_id not in self._monitor._workers and "hardware" in msg:
+                    node = Node(
+                        node_id=node_id,
+                        role=NodeRole.WORKER,
+                        hardware=_hardware_from_dict(msg.get("hardware", {})),
+                        address=addr[0],
+                        advertised_address=msg.get("address"),
+                        status=NodeStatus(msg.get("status", "idle")),
+                    )
+                    node.models = msg.get("models", [])
+                    self._monitor.register(node)
                 if "models" in msg:
-                    node_id = msg["node_id"]
                     if node_id in self._monitor._workers:
                         self._monitor._workers[node_id].node.models = msg.get("models", [])
                 self._monitor.record_heartbeat(
-                    msg["node_id"],
+                    node_id,
                     msg.get("status", "idle"),
                     msg.get("compute_score", 0),
                     addr[0],

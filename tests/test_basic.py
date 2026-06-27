@@ -255,6 +255,29 @@ class TestClusterFormation:
         assert listener.monitor.worker_count == 0  # heartbeat without join doesn't register
         listener.stop()
 
+    def test_worker_heartbeat_with_hardware_registers_after_controller_restart(self):
+        """Unknown workers can re-register via heartbeat after controller restart."""
+        listener = HeartbeatListener(port=18907)
+        node = make_node("rejoining-worker")
+
+        msg = json.dumps({
+            "type": "heartbeat",
+            "node_id": node.node_id,
+            "status": "idle",
+            "compute_score": 100.0,
+            "hardware": node.to_dict()["hardware"],
+            "address": "192.168.100.31",
+            "models": ["qwen2.5-coder:7b"],
+        }).encode()
+        listener._handle_message(msg, ("192.168.1.2", 50000))
+
+        workers = listener.monitor.get_all_workers()
+        assert len(workers) == 1
+        assert workers[0].node.node_id == "rejoining-worker"
+        assert workers[0].node.address == "192.168.1.2"
+        assert workers[0].node.advertised_address == "192.168.100.31"
+        assert workers[0].node.models == ["qwen2.5-coder:7b"]
+
     def test_heartbeat_updates_registered_worker_models(self):
         """Controller keeps model updates received after join."""
         listener = HeartbeatListener(port=18903)

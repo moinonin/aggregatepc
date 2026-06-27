@@ -162,6 +162,7 @@ class WorkerDaemon:
                     "node_id": self.node.node_id,
                     "status": self.node.status.value,
                     "compute_score": self.node.compute_score,
+                    "hardware": self.node.to_dict()["hardware"],
                     "address": self._get_local_ip(),
                     "models": self.node.models,
                 }).encode()
@@ -246,6 +247,7 @@ class WorkerDaemon:
                     "node_id": self.node.node_id,
                     "status": self.node.status.value,
                     "compute_score": self.node.compute_score,
+                    "hardware": self.node.to_dict()["hardware"],
                     "address": self._get_local_ip(),
                     "models": model_names,
                 }).encode()
