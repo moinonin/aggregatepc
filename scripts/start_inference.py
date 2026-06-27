@@ -1,29 +1,35 @@
 #!/usr/bin/env python3
-"""Start inference with the best available model on the cluster.
+"""Start inference with the best available model.
 
-Discovers local models, selects the best one by size, and starts
-an appropriate inference server (Ollama, llama.cpp, or vLLM).
+Modes:
+  1. Local mode (default): Discover and serve best model on this machine
+  2. Broadcast mode (--broadcast): Find best model across cluster and broadcast to workers
+
+Usage:
+  python3 scripts/start_inference.py              # Local inference
+  python3 scripts/start_inference.py --broadcast   # Cluster-wide broadcast
 """
 
 import sys
 import os
 import time
+import socket
+import json
 import subprocess
-import signal
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cluster.models.registry import discover_all_models, get_best_model
+from cluster.config import load_config
 
 
 def start_ollama_server():
     """Start Ollama server if not already running."""
-    import socket
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(2.0)
             s.connect(("127.0.0.1", 11434))
-            return True  # Already running
+            return True
     except (OSError, ConnectionRefusedError):
         pass
 
@@ -50,10 +56,8 @@ def start_ollama_server():
 
 def start_ollama_model(model_name: str) -> bool:
     """Pull and start serving an Ollama model."""
-    from cluster.models.ollama import pull_ollama_model, load_ollama_model
+    from cluster.models.ollama import pull_ollama_model, load_ollama_model, list_ollama_models
 
-    # Check if model is already available
-    from cluster.models.ollama import list_ollama_models
     existing = list_ollama_models()
     if not any(m["name"] == model_name for m in existing):
         print(f"[aggregatepc] Pulling {model_name}...")
@@ -66,20 +70,6 @@ def start_ollama_model(model_name: str) -> bool:
     return True
 
 
-def start_llama_cpp_server(model_path: str, port: int = 8000) -> subprocess.Popen:
-    """Start llama.cpp server for a GGUF model."""
-    try:
-        process = subprocess.Popen(
-            ["llama-server", "-m", model_path, "-c", "2048", "--port", str(port)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return process
-    except FileNotFoundError:
-        print("[aggregatepc] llama-server not found. Install llama.cpp.")
-        return None
-
-
 def start_vllm_server(model_path: str, port: int = 8000) -> subprocess.Popen:
     """Start vLLM OpenAI-compatible server for a HuggingFace model."""
     try:
@@ -89,8 +79,6 @@ def start_vllm_server(model_path: str, port: int = 8000) -> subprocess.Popen:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        # Wait for server to be ready
-        import socket
         for _ in range(30):
             time.sleep(1.0)
             try:
@@ -100,7 +88,6 @@ def start_vllm_server(model_path: str, port: int = 8000) -> subprocess.Popen:
                     return process
             except (OSError, ConnectionRefusedError):
                 continue
-            # Check if process died
             if process.poll() is not None:
                 print("[aggregatepc] vLLM server failed to start")
                 return None
@@ -110,7 +97,8 @@ def start_vllm_server(model_path: str, port: int = 8000) -> subprocess.Popen:
         return None
 
 
-def main():
+def local_inference():
+    """Run inference locally on this machine."""
     print("[aggregatepc] Discovering best available model...")
 
     models = discover_all_models()
@@ -120,39 +108,18 @@ def main():
         print("  ollama pull llama3:8b")
         print("  ollama pull mistral:7b")
         print("  ollama pull phi3:mini")
-        print()
-        print("[aggregatepc] Or set custom model paths:")
-        print("  export GGML_MODELS=/path/to/your/gguf/models")
-        print("  export HF_HOME=/path/to/your/huggingface/cache")
         sys.exit(1)
 
-    # Always prefer Ollama models (already servable) over other types
+    # Prefer Ollama models
     from cluster.models.ollama import is_ollama_installed, list_ollama_models
+    ollama_models = list_ollama_models() if is_ollama_installed() else []
 
-    ollama_available = is_ollama_installed()
-    ollama_models = list_ollama_models() if ollama_available else []
-
-    best = get_best_model(models)
-
-    # If we have running Ollama models, prefer those even if they're smaller
     if ollama_models:
-        # Pick the largest Ollama model
-        best_ollama = ollama_models[0]  # list_ollama_models sorts by size desc
+        best_ollama = ollama_models[0]
         target_model_name = best_ollama["name"]
         print(f"[aggregatepc] Best model: {target_model_name} (ollama)")
         print(f"[aggregatepc]   Size: {best_ollama.get('size_gb', '?')}GB")
-    elif best:
-        target_model_name = best.name
-        print(f"[aggregatepc] Best model: {target_model_name}")
-        print(f"[aggregatepc]   Type: {best.model_type}")
-        print(f"[aggregatepc]   Size: {best.size_mb}MB")
-        print(f"[aggregatepc]   Path: {best.path}")
-    else:
-        print("[aggregatepc] Could not determine best model")
-        sys.exit(1)
 
-    if ollama_models or (best and best.model_type == "ollama"):
-        # Start Ollama and the model
         if not start_ollama_server():
             print("[aggregatepc] Ollama not installed or could not start.")
             print("[aggregatepc] Install Ollama: https://ollama.com/download")
@@ -160,7 +127,6 @@ def main():
 
         if not start_ollama_model(target_model_name):
             print(f"[aggregatepc] Could not start model {target_model_name}")
-            print("[aggregatepc] Try: ollama pull qwen2.5-coder:7b")
             sys.exit(1)
 
         print(f"[aggregatepc] Ollama serving {target_model_name} at http://localhost:11434")
@@ -171,54 +137,113 @@ def main():
         print()
         print("[aggregatepc] Ollama server is running. Press Ctrl+C to stop.")
 
-        # Keep running
         try:
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
             print("\n[aggregatepc] Stopping inference server...")
 
-    elif best.model_type == "llama.cpp":
-        print(f"[aggregatepc] Starting llama.cpp server for {best.name}...")
-        process = start_llama_cpp_server(best.path)
-        if process:
-            print(f"[aggregatepc] llama.cpp server running on http://localhost:8000")
-            print("[aggregatepc] Press Ctrl+C to stop.")
-            try:
-                process.wait()
-            except KeyboardInterrupt:
-                process.terminate()
-        else:
-            print("[aggregatepc] Could not start llama.cpp server")
-            sys.exit(1)
-
-    elif best.model_type == "huggingface":
-        # Auto-start vLLM for HuggingFace models
-        print(f"[aggregatepc] Starting vLLM server for {best.name}...")
-        process = start_vllm_server(best.path)
-        if process:
-            print(f"[aggregatepc] vLLM serving {best.name} at http://localhost:8000")
-            print(f"[aggregatepc] API endpoint: http://localhost:8000/v1/chat/completions")
-            print()
-            print("[aggregatepc] Test with:")
-            print(f'  curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d \'{{"model":"{best.name}","messages":[{{"role":"user","content":"Hello"}}]}}\'')
-            print()
-            print("[aggregatepc] vLLM server is running. Press Ctrl+C to stop.")
-            try:
-                process.wait()
-            except KeyboardInterrupt:
-                process.terminate()
-        else:
-            print("[aggregatepc] Could not start vLLM server")
-            print("[aggregatepc] Install vLLM: pip install vllm")
-            print(f"[aggregatepc] Or start manually: python -m vllm.entrypoints.openai.api_server --model {best.path} --port 8000")
-            sys.exit(1)
-
     else:
-        print(f"[aggregatepc] Model type '{best.model_type}' requires manual setup.")
-        print(f"[aggregatepc] For HuggingFace models, use vLLM or transformers:")
-        print(f"  python -m vllm.entrypoints.openai.api_server --model {best.path} --port 8000")
-        sys.exit(0)
+        best = get_best_model(models)
+        if not best:
+            print("[aggregatepc] Could not determine best model")
+            sys.exit(1)
+
+        print(f"[aggregatepc] Best model: {best.name}")
+        print(f"[aggregatepc]   Type: {best.model_type}")
+        print(f"[aggregatepc]   Size: {best.size_mb}MB")
+        print(f"[aggregatepc]   Path: {best.path}")
+
+        if best.model_type == "huggingface":
+            print(f"[aggregatepc] Starting vLLM server for {best.name}...")
+            process = start_vllm_server(best.path)
+            if process:
+                print(f"[aggregatepc] vLLM serving {best.name} at http://localhost:8000")
+                print(f"[aggregatepc] API endpoint: http://localhost:8000/v1/chat/completions")
+                print()
+                print("[aggregatepc] Test with:")
+                print(f'  curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d \'{{"model":"{best.name}","messages":[{{"role":"user","content":"Hello"}}]}}\'')
+                print()
+                print("[aggregatepc] vLLM server is running. Press Ctrl+C to stop.")
+                try:
+                    process.wait()
+                except KeyboardInterrupt:
+                    process.terminate()
+            else:
+                print("[aggregatepc] Could not start vLLM server")
+                print("[aggregatepc] Install vLLM: pip install vllm")
+                sys.exit(1)
+        else:
+            print(f"[aggregatepc] Model type '{best.model_type}' requires manual setup.")
+            sys.exit(0)
+
+
+def broadcast_inference():
+    """Find best model across cluster and broadcast to all workers."""
+    from cluster.network.heartbeat import HeartbeatListener
+
+    config = load_config()
+    port = config.get("controller_port", 8765)
+
+    print("[aggregatepc] Discovering best model across cluster...")
+
+    listener = HeartbeatListener(port=port)
+    listener.start()
+    time.sleep(3)
+
+    # Aggregate models from all workers
+    all_models = []
+    for state in listener.monitor.get_all_workers():
+        for model_name in state.node.models:
+            is_ollama = model_name.startswith("ollama://")
+            clean_name = model_name.replace("ollama://", "")
+            all_models.append(type("ModelInfo", (), {
+                "name": clean_name,
+                "path": model_name,
+                "size_mb": 0,
+                "model_type": "ollama" if is_ollama else "unknown",
+            }))
+
+    if not all_models:
+        print("[aggregatepc] No models found on any worker")
+        print("[aggregatepc] Pull a model on a worker first: ollama pull llama3:8b")
+        listener.stop()
+        sys.exit(1)
+
+    best = get_best_model(all_models)
+    if not best:
+        print("[aggregatepc] Could not determine best model")
+        listener.stop()
+        sys.exit(1)
+
+    model_name = best.name
+    print(f"[aggregatepc] Cluster best model: {model_name}")
+
+    # Broadcast to all workers
+    workers = listener.monitor.get_all_workers()
+    if not workers:
+        print("[aggregatepc] No workers connected")
+        listener.stop()
+        sys.exit(1)
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        msg = json.dumps({"type": "model_select", "model": model_name}).encode()
+        for state in workers:
+            addr = state.node.address
+            if addr:
+                s.sendto(msg, (addr, port + 100))
+                print(f"[aggregatepc] Sent to {addr} ({state.node.node_id})")
+
+    print(f"[aggregatepc] Broadcast {model_name} to {len(workers)} worker(s)")
+    print("[aggregatepc] Workers will pull (if needed) and serve the model.")
+    listener.stop()
+
+
+def main():
+    if "--broadcast" in sys.argv:
+        broadcast_inference()
+    else:
+        local_inference()
 
 
 if __name__ == "__main__":
