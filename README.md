@@ -261,6 +261,21 @@ Expected response:
 
 If the connection times out, Ollama is not bound to all interfaces or the firewall is blocking it.
 
+Test inference on a specific model:
+```bash
+# Replace <ip> and <model> with your server's IP and model name
+curl http://<ip>:11434/api/generate -d '{"model":"<model>","prompt":"Hello, how are you?","stream":false}'
+```
+
+Example commands for your cluster:
+```bash
+# defi (192.168.100.11) - Monk-Router-Gemma4e2b
+curl http://192.168.100.11:11434/api/generate -d '{"model":"rubinmaximilian/Monk-Router-Gemma4e2b:latest","prompt":"Hello, how are you?","stream":false}'
+
+# nr-dell (192.168.100.31) - qwen2.5-coder:7b
+curl http://192.168.100.31:11434/api/generate -d '{"model":"qwen2.5-coder:7b","prompt":"Hello, how are you?","stream":false}'
+```
+
 ### Install without packaging
 
 If you don't want to install, you can run directly:
