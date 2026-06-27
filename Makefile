@@ -1,4 +1,4 @@
-.PHONY: help controller worker profile status test clean install
+.PHONY: help controller worker profile status test clean install inference
 
 # Default target
 help: ## Show this help message
@@ -16,6 +16,7 @@ help: ## Show this help message
 	@echo "  make worker CONTROLLER=192.168.1.5  Join a specific controller"
 	@echo "  make profile              Detect hardware and scan for cluster"
 	@echo "  make status               Show cluster status"
+	@echo "  make inference            Start inference with best available model"
 	@echo "  make test                 Run tests"
 	@echo ""
 
@@ -38,6 +39,12 @@ profile: ## Profile hardware and optionally scan network
 
 status: ## Show cluster status (optionally set CONTROLLER=<IP> PORT=<PORT>)
 	python3 aggregatepc.py status --controller $(or $(CONTROLLER),127.0.0.1) --port $(or $(PORT),8765)
+
+inference: ## Start inference with best available model on the cluster
+	@if ! command -v python3 >/dev/null 2>&1; then \
+		echo "python3 is required"; exit 1; \
+	fi
+	python3 scripts/start_inference.py $(ARGS)
 
 test: ## Run tests
 	python3 -m pytest tests/ -v || python3 -c "import sys; sys.path.insert(0, '.'); exec(open('tests/test_basic.py').read())" 2>/dev/null || echo "No tests directory yet. Run individual modules manually."

@@ -145,11 +145,22 @@ def discover_ollama_models() -> list[ModelInfo]:
                 continue
             for model_dir in os.listdir(org_path):
                 model_path = os.path.join(org_path, model_dir)
+                if not os.path.isdir(model_path):
+                    continue
                 size_mb = _dir_size_mb(model_path)
-                model_name = f"{org_dir}/{model_dir}" if org_dir != "library" else model_dir
-                name, parameters, quantization = _parse_model_name(model_name)
+                # Clean up model name for Ollama API
+                if org_dir == "library":
+                    model_name = model_dir
+                else:
+                    model_name = f"{org_dir}/{model_dir}"
+                # Normalize: replace underscores with colons for tags
+                if ":" not in model_name:
+                    model_name_normalized = model_name.replace("_", ":")
+                else:
+                    model_name_normalized = model_name
+                name, parameters, quantization = _parse_model_name(model_name_normalized)
                 models.append(ModelInfo(
-                    name=model_name,
+                    name=model_name_normalized,
                     path=model_path,
                     size_mb=size_mb,
                     model_type="ollama",
