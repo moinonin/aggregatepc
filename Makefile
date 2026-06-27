@@ -38,9 +38,18 @@ profile: ## Profile hardware and optionally scan network
 	fi
 
 status: ## Show cluster status (optionally set CONTROLLER=<IP> PORT=<PORT>)
-	python3 aggregatepc.py status --controller $(or $(CONTROLLER),127.0.0.1) --port $(or $(PORT),8765)
+	python3 -c "
+import sys; sys.path.insert(0, '.')
+from cluster.config import load_config
+config = load_config()
+controller = '$(or $(CONTROLLER),$(config.get(\"controller_ip\",\"127.0.0.1\")))'
+port = int('$(or $(PORT),$(config.get(\"controller_port\",8765)))')
+print(f'Querying controller at {controller}:{port}')
+import subprocess
+subprocess.run([sys.executable, 'aggregatepc.py', 'status', '--controller', controller, '--port', str(port)])
+"
 
-inference: ## Start inference proxy - routes requests to best cluster model
+inference: ## Start inference with best available model on the cluster
 	python3 scripts/start_inference.py --broadcast
 
 test: ## Run tests

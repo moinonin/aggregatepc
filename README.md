@@ -153,10 +153,15 @@ Output:
 Once workers have joined and Ollama is running:
 
 ```bash
-make inference
-```
+# Test directly against a worker's Ollama (from any machine on the network)
+curl http://192.168.100.11:11434/api/generate -d '{"model":"qwen2.5-coder:3b","prompt":"Hello","stream":false}'
+curl http://192.168.100.31:11434/api/generate -d '{"model":"qwen2.5-coder:7b","prompt":"Hello","stream":false}'
 
-This discovers the best available model across the cluster and starts serving it.
+# Or start the cluster proxy (routes to best model automatically)
+make inference
+# Then test through the proxy:
+curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"any","messages":[{"role":"user","content":"Hello"}]}'
+```
 
 ---
 
@@ -535,7 +540,7 @@ make worker               # Start as worker (auto-discover or from config)
 make worker CONTROLLER=192.168.1.5  # Join specific controller
 make profile              # Profile local hardware
 make profile SCAN=1       # Profile + network scan
-make status               # Show cluster status
+make status               # Show cluster status (uses controller IP from config)
 make status CONTROLLER=192.168.1.5  # Query specific controller
 make inference            # Start inference with best available model
 make test                 # Run test suite (pytest)
