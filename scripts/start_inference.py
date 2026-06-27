@@ -278,8 +278,9 @@ def start_proxy():
     proxy = ClusterProxy(port=proxy_port)
     best_node = proxy.discover_cluster(controller_port)
 
+    status = proxy.get_status()
+
     if best_node:
-        status = proxy.get_status()
         print(f"[aggregatepc] Cluster discovered: {status['nodes']} node(s)")
         print(f"[aggregatepc] Best model: {status['best_model']}")
         print(f"[aggregatepc] Running on: {best_node['node_id']} ({best_node['address']})")
