@@ -141,6 +141,7 @@ class ClusterProxy:
         self._best_node = None
         self._best_model = None
         self._model_to_node = {}
+        self._advertised_model_to_node = {}
         self._lock = threading.Lock()
 
     def discover_cluster(self, controller_port: int, wait_seconds: int = 5):
@@ -160,6 +161,7 @@ class ClusterProxy:
             best_node = None
             best_model = None
             model_to_node = {}
+            advertised_model_to_node = {}
 
             if status:
                 workers = status.get("workers", [])
@@ -188,6 +190,10 @@ class ClusterProxy:
                         "compute_score": worker_info.get("compute_score", 0),
                         "ollama_port": ollama_port,
                     })
+                    for model_name in all_models:
+                        clean_name = _normalize_model_name(model_name)
+                        if clean_name and clean_name not in advertised_model_to_node:
+                            advertised_model_to_node[clean_name] = nodes[-1]
 
                 # Find best model across cluster
                 all_model_infos = []
@@ -216,6 +222,7 @@ class ClusterProxy:
                 self._best_node = best_node
                 self._best_model = best_model
                 self._model_to_node = model_to_node
+                self._advertised_model_to_node = advertised_model_to_node
 
             if best_node or time.time() >= deadline:
                 return best_node
@@ -299,6 +306,22 @@ class ClusterProxy:
 
             return self._best_node, self._best_model
 
+    def explain_unavailable_model(self, requested_model: Optional[str]) -> str:
+        """Return a concrete reason a requested model cannot currently be routed."""
+        normalized = _normalize_model_name(requested_model)
+        if not normalized:
+            return "No model available in cluster"
+
+        with self._lock:
+            node = self._advertised_model_to_node.get(normalized)
+            if node and not node["backend_reachable"]:
+                return (
+                    f"Model is advertised but backend is unreachable: {normalized} "
+                    f"on {node['node_id']} ({node['address']}:{node.get('ollama_port', 11434)})"
+                )
+
+        return f"Model not available in cluster: {requested_model}"
+
 
 class ProxyHandler(BaseHTTPRequestHandler):
     """HTTP handler that proxies requests to the best cluster node."""
@@ -342,7 +365,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self.send_response(503)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                error = {"error": f"Model not available in cluster: {requested_model}" if requested_model else "No model available in cluster"}
+                error = {"error": self.server.proxy.explain_unavailable_model(requested_model)}
                 self.wfile.write(json.dumps(error).encode())
                 return
 

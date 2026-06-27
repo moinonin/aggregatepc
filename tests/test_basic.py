@@ -589,6 +589,10 @@ class TestInferenceProxy:
         assert status["all_models"] == ["phi3:mini"]
         assert status["available_models"] == []
         assert status["backends"][0]["reachable"] is False
+        assert proxy.explain_unavailable_model("phi3:mini") == (
+            "Model is advertised but backend is unreachable: phi3:mini "
+            "on worker-1 (192.168.100.11:11434)"
+        )
 
     def test_select_target_uses_requested_model_node(self, monkeypatch):
         import scripts.start_inference as inference
