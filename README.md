@@ -44,14 +44,26 @@ You probably have several computers sitting around: an old laptop, a desktop you
 ### 1. Clone and setup
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/moinonin/aggregatepc.git
 cd aggregatepc
 python3 -m venv .venv
 source .venv/bin/activate
 pip install pytest  # optional, for running tests
 ```
 
-### 2. Configure your cluster
+### 2. Install Ollama and pull a model
+
+```bash
+# Install Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Pull a model (choose based on your GPU/RAM)
+ollama pull phi3:mini    # ~2.3GB, good for testing
+ollama pull llama3:8b    # ~4.7GB, good for 8GB+ VRAM
+ollama pull mistral:7b   # ~4.1GB, good alternative
+```
+
+### 3. Configure your cluster
 
 Edit `configs/cluster.conf` with your machines' local IP addresses:
 
@@ -64,7 +76,7 @@ Edit `configs/cluster.conf` with your machines' local IP addresses:
 192.168.1.11
 ```
 
-### 3. Start the controller (on one machine)
+### 4. Start the controller (on one machine)
 
 ```bash
 make controller
@@ -81,7 +93,7 @@ You'll see output like:
 [aggregatepc] Workers can join with: aggregatepc worker
 ```
 
-### 4. Join workers (on the other machines)
+### 5. Join workers (on the other machines)
 
 ```bash
 make worker
@@ -91,7 +103,7 @@ python3 aggregatepc.py worker
 
 Workers read the controller IP from `configs/cluster.conf` automatically. No flags needed.
 
-### 5. Check cluster status
+### 6. Check cluster status
 
 ```bash
 make status
@@ -118,13 +130,33 @@ Output:
           {"name": "RTX 3060", "vram_mb": 12288, "integrated": false}
         ]
       },
-      "compute_score": 376.0
+      "compute_score": 376.0,
+      "models": ["llama3:8b", "mistral:7b"]
     }
   ],
   "worker_count": 1,
-  "available_count": 1
+  "available_count": 1,
+  "cluster_metrics": {
+    "total_cpu_cores": 20,
+    "total_ram_mb": 32768,
+    "total_ram_gb": 32.0,
+    "total_vram_mb": 12288,
+    "total_vram_gb": 12.0,
+    "total_models": 2,
+    "available_models": ["llama3:8b", "mistral:7b"]
+  }
 }
 ```
+
+### 7. Start inference
+
+Once workers have joined and Ollama is running:
+
+```bash
+make inference
+```
+
+This discovers the best available model across the cluster and starts serving it.
 
 ---
 
@@ -135,7 +167,8 @@ Output:
 - Python 3.10+
 - Windows 10+, Linux (any modern distro), or macOS 12+
 - All machines on the same local network (same subnet)
-- No external dependencies beyond Python standard library
+- **Ollama** (required for LLM inference) — https://ollama.com/download
+- No other external dependencies
 
 ### Install from source (recommended)
 
@@ -148,6 +181,23 @@ pip install -e .
 ```
 
 This installs the `aggregatepc` command and the `zeroconf` dependency for mDNS auto-discovery.
+
+### Install Ollama (required for inference)
+
+```bash
+# macOS/Linux:
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Or with Homebrew:
+brew install ollama
+
+# Windows: download from https://ollama.com/download
+```
+
+Verify Ollama is working:
+```bash
+ollama version
+```
 
 ### Install without packaging
 
@@ -216,6 +266,7 @@ sudo apt install python3 python3-venv
 # Python 3.10+ is pre-installed on macOS 12+
 # If not, use Homebrew:
 brew install python@3.11
+brew install ollama
 ```
 
 **Windows:**
@@ -401,17 +452,18 @@ aggregatepc status --controller 192.168.1.5 --port 9000
 ## Makefile Targets
 
 ```bash
-make help        # Show all available targets with descriptions
-make controller  # Start as cluster controller
-make worker      # Start as worker (auto-discover or from config)
+make help                 # Show all available targets with descriptions
+make controller           # Start as cluster controller
+make worker               # Start as worker (auto-discover or from config)
 make worker CONTROLLER=192.168.1.5  # Join specific controller
-make profile     # Profile local hardware
-make profile SCAN=1  # Profile + network scan
-make status      # Show cluster status
+make profile              # Profile local hardware
+make profile SCAN=1       # Profile + network scan
+make status               # Show cluster status
 make status CONTROLLER=192.168.1.5  # Query specific controller
-make test        # Run test suite (pytest)
-make clean       # Remove __pycache__ and .pyc files
-make install     # Attempt pip install -e . (if pyproject.toml exists)
+make inference            # Start inference with best available model
+make test                 # Run test suite (pytest)
+make clean                # Remove __pycache__ and .pyc files
+make install              # Attempt pip install -e . (if pyproject.toml exists)
 ```
 
 ### Passing variables
