@@ -160,16 +160,20 @@ class ClusterProxy:
                     # Get models advertised by this worker
                     worker_models = worker_info.get("models", [])
 
-                    # Also check if worker's Ollama has models via API
+                    # Also check if worker's Ollama is reachable via API
                     ollama_models = self._get_worker_ollama_models(address, ollama_port)
+                    backend_reachable = ollama_models is not None
 
                     # Combine: prefer explicitly advertised models, fall back to Ollama API
-                    all_models = sorted(set(worker_models + ollama_models))
+                    all_models = sorted(set(worker_models + (ollama_models or [])))
 
                     nodes.append({
                         "node_id": worker_info.get("node_id", worker_info.get("hostname", "unknown")),
                         "address": address,
                         "models": all_models,
+                        "advertised_models": worker_models,
+                        "backend_models": ollama_models or [],
+                        "backend_reachable": backend_reachable,
                         "compute_score": worker_info.get("compute_score", 0),
                         "ollama_port": ollama_port,
                     })
@@ -178,6 +182,8 @@ class ClusterProxy:
                 all_model_infos = []
                 model_to_node = {}
                 for node in nodes:
+                    if not node["backend_reachable"]:
+                        continue
                     for model_name in node["models"]:
                         clean_name = model_name.replace("ollama://", "")
                         all_model_infos.append(type("ModelInfo", (), {
@@ -226,8 +232,12 @@ class ClusterProxy:
             logger.debug(f"Could not query controller: {e}")
             return None
 
-    def _get_worker_ollama_models(self, worker_address: str, ollama_port: int) -> list[str]:
-        """Check what Ollama models are available on a worker."""
+    def _get_worker_ollama_models(self, worker_address: str, ollama_port: int) -> Optional[list[str]]:
+        """Check what Ollama models are available on a worker.
+
+        Returns None when the backend is unreachable. An empty list means the
+        backend responded but has no models.
+        """
         try:
             url = f"http://{worker_address}:{ollama_port}/api/tags"
             req = Request(url)
@@ -236,7 +246,7 @@ class ClusterProxy:
                 models = data.get("models", [])
                 return [m["name"] for m in models]
         except Exception:
-            return []
+            return None
 
     def get_status(self) -> dict:
         """Get cluster model status."""
@@ -245,6 +255,22 @@ class ClusterProxy:
                 "nodes": len(self._nodes),
                 "best_node": self._best_node["node_id"] if self._best_node else None,
                 "best_model": self._best_model,
+                "backends": [
+                    {
+                        "node_id": node["node_id"],
+                        "address": node["address"],
+                        "reachable": node["backend_reachable"],
+                        "advertised_models": node["advertised_models"],
+                        "backend_models": node["backend_models"],
+                    }
+                    for node in self._nodes
+                ],
+                "available_models": list(set(
+                    m.replace("ollama://", "")
+                    for node in self._nodes
+                    if node["backend_reachable"]
+                    for m in node["models"]
+                )),
                 "all_models": list(set(
                     m.replace("ollama://", "")
                     for node in self._nodes
@@ -269,7 +295,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             models_data = {
                 "data": [
                     {"id": m, "object": "model", "created": 0, "owned_by": "aggregatepc"}
-                    for m in status.get("all_models", [])
+                    for m in status.get("available_models", [])
                 ],
                 "object": "list",
             }
@@ -382,7 +408,7 @@ def start_proxy():
     print("[aggregatepc] Test with:")
     print(f'  curl http://localhost:{proxy_port}/v1/chat/completions -H "Content-Type: application/json" -d \'{{"model":"{status["best_model"] or "any"}","messages":[{{"role":"user","content":"Hello"}}]}}\'')
     print()
-    print("[aggregatepc] Status: http://localhost:{proxy_port}/status")
+    print(f"[aggregatepc] Status: http://localhost:{proxy_port}/status")
     print("[aggregatepc] Press Ctrl+C to stop.")
 
     try:

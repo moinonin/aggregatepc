@@ -535,6 +535,29 @@ class TestInferenceProxy:
         assert best["node_id"] == "worker-1"
         assert status["best_model"] == "phi3:mini"
         assert status["all_models"] == ["phi3:mini"]
+        assert status["available_models"] == ["phi3:mini"]
+
+    def test_cluster_discovery_does_not_select_unreachable_backend(self, monkeypatch):
+        import scripts.start_inference as inference
+
+        proxy = inference.ClusterProxy()
+        monkeypatch.setattr(proxy, "_query_controller_status", lambda port: {
+            "workers": [{
+                "node_id": "worker-1",
+                "address": "192.168.100.11",
+                "models": ["phi3:mini"],
+            }]
+        })
+        monkeypatch.setattr(proxy, "_get_worker_ollama_models", lambda address, port: None)
+
+        best = proxy.discover_cluster(8765, wait_seconds=0)
+        status = proxy.get_status()
+
+        assert best is None
+        assert status["best_model"] is None
+        assert status["all_models"] == ["phi3:mini"]
+        assert status["available_models"] == []
+        assert status["backends"][0]["reachable"] is False
 
 
 if __name__ == "__main__":

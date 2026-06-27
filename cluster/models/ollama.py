@@ -57,10 +57,13 @@ def start_ollama_serve() -> bool:
         return False
 
     try:
+        env = os.environ.copy()
+        env.setdefault("OLLAMA_HOST", f"0.0.0.0:{OLLAMA_DEFAULT_PORT}")
         subprocess.Popen(
             ["ollama", "serve"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=env,
         )
         # Wait for it to start
         for _ in range(15):
