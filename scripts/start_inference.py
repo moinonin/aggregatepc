@@ -127,8 +127,10 @@ class ClusterProxy:
 
     def __init__(self, port: int = 8000):
         self.port = port
+        self.controller_port = 8765
         self._nodes = []  # [{address, port, models, score}]
         self._best_node = None
+        self._best_model = None
         self._lock = threading.Lock()
 
     def discover_cluster(self, controller_port: int, wait_seconds: int = 5):
@@ -137,76 +139,86 @@ class ClusterProxy:
         Uses the controller's status endpoint to get worker info,
         then checks each worker for available Ollama models.
         """
-        config = load_config()
         ollama_port = 11434
+        self.controller_port = controller_port
+        deadline = time.time() + wait_seconds
 
-        with self._lock:
-            self._nodes = []
-
+        while True:
             # Query controller status to get worker addresses
             status = self._query_controller_status(controller_port)
-            if not status:
-                return None
+            nodes = []
+            best_node = None
+            best_model = None
 
-            workers = status.get("workers", [])
-            for worker_info in workers:
-                address = worker_info.get("address")
-                if not address:
-                    continue
+            if status:
+                workers = status.get("workers", [])
+                for worker_info in workers:
+                    address = worker_info.get("address")
+                    if not address:
+                        continue
 
-                # Get models advertised by this worker
-                worker_models = worker_info.get("models", [])
+                    # Get models advertised by this worker
+                    worker_models = worker_info.get("models", [])
 
-                # Also check if worker's Ollama has models via API
-                ollama_models = self._get_worker_ollama_models(address, ollama_port)
+                    # Also check if worker's Ollama has models via API
+                    ollama_models = self._get_worker_ollama_models(address, ollama_port)
 
-                # Combine: prefer explicitly advertised models, fall back to Ollama API
-                all_models = list(set(worker_models + ollama_models))
+                    # Combine: prefer explicitly advertised models, fall back to Ollama API
+                    all_models = sorted(set(worker_models + ollama_models))
 
-                self._nodes.append({
-                    "node_id": worker_info.get("node_id", worker_info.get("hostname", "unknown")),
-                    "address": address,
-                    "models": all_models,
-                    "compute_score": worker_info.get("compute_score", 0),
-                    "ollama_port": ollama_port,
-                })
+                    nodes.append({
+                        "node_id": worker_info.get("node_id", worker_info.get("hostname", "unknown")),
+                        "address": address,
+                        "models": all_models,
+                        "compute_score": worker_info.get("compute_score", 0),
+                        "ollama_port": ollama_port,
+                    })
 
-            # Find best model across cluster
-            all_models = []
-            model_to_node = {}
-            for node in self._nodes:
-                for model_name in node["models"]:
-                    clean_name = model_name.replace("ollama://", "")
-                    all_models.append(type("ModelInfo", (), {
-                        "name": clean_name,
-                        "path": model_name,
-                        "size_mb": 0,
-                        "model_type": "ollama",
-                    }))
-                    # Track which node has which model
-                    if clean_name not in model_to_node:
-                        model_to_node[clean_name] = node
+                # Find best model across cluster
+                all_model_infos = []
+                model_to_node = {}
+                for node in nodes:
+                    for model_name in node["models"]:
+                        clean_name = model_name.replace("ollama://", "")
+                        all_model_infos.append(type("ModelInfo", (), {
+                            "name": clean_name,
+                            "path": model_name,
+                            "size_mb": 0,
+                            "model_type": "ollama",
+                        }))
+                        # Track which node has which model
+                        if clean_name not in model_to_node:
+                            model_to_node[clean_name] = node
 
-            if all_models:
-                best = get_best_model(all_models)
-                self._best_node = model_to_node.get(best.name, self._nodes[0] if self._nodes else None)
+                if all_model_infos:
+                    selected = get_best_model(all_model_infos)
+                    best_model = selected.name
+                    best_node = model_to_node.get(best_model, nodes[0] if nodes else None)
 
-        return self._best_node
+            with self._lock:
+                self._nodes = nodes
+                self._best_node = best_node
+                self._best_model = best_model
+
+            if best_node or time.time() >= deadline:
+                return best_node
+
+            time.sleep(1.0)
 
     def _query_controller_status(self, controller_port: int) -> Optional[dict]:
         """Query the controller's status to get worker info."""
         config = load_config()
         controller_ip = config.get("controller_ip", "127.0.0.1")
-        callback_port = controller_port + 50
 
         try:
-            msg = json.dumps({
-                "type": "status_query",
-                "status_callback": {"address": "127.0.0.1", "port": callback_port}
-            }).encode()
-
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                 s.settimeout(5.0)
+                s.bind(("", 0))
+                callback_port = s.getsockname()[1]
+                msg = json.dumps({
+                    "type": "status_query",
+                    "status_callback": {"address": get_local_ip(), "port": callback_port}
+                }).encode()
                 s.sendto(msg, (controller_ip, controller_port))
                 data, _ = s.recvfrom(8192)
                 return json.loads(data.decode())
@@ -232,7 +244,7 @@ class ClusterProxy:
             return {
                 "nodes": len(self._nodes),
                 "best_node": self._best_node["node_id"] if self._best_node else None,
-                "best_model": self._best_node["models"][0] if self._best_node and self._best_node["models"] else None,
+                "best_model": self._best_model,
                 "all_models": list(set(
                     m.replace("ollama://", "")
                     for node in self._nodes
@@ -277,12 +289,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
             # Route to the best node
             target = self.server.proxy._best_node
             if not target:
+                target = self.server.proxy.discover_cluster(self.server.proxy.controller_port, wait_seconds=2)
+            if not target:
                 self.send_response(503)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 error = {"error": "No model available in cluster"}
                 self.wfile.write(json.dumps(error).encode())
                 return
+
+            body = self._with_target_model(body, target)
 
             # Determine target endpoint
             if self.path == "/v1/chat/completions":
@@ -312,6 +328,25 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         # Suppress default logging for cleaner output
         pass
+
+    def _with_target_model(self, body: bytes, target: dict) -> bytes:
+        """Use the discovered model when clients send a placeholder model."""
+        try:
+            payload = json.loads(body.decode())
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return body
+
+        requested = payload.get("model")
+        target_model = self.server.proxy._best_model
+        if requested in (None, "", "any") and target_model:
+            payload["model"] = target_model
+            return json.dumps(payload).encode()
+
+        if requested not in target.get("models", []) and target_model:
+            payload["model"] = target_model
+            return json.dumps(payload).encode()
+
+        return body
 
 
 def start_proxy():

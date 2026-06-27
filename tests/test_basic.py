@@ -67,6 +67,40 @@ class JoinSocket:
         return json.dumps({"status": "accepted"}).encode(), ("127.0.0.1", 8765)
 
 
+class StatusQuerySocket:
+    sent = []
+    bound = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def settimeout(self, timeout):
+        self.timeout = timeout
+
+    def bind(self, addr):
+        self.bound.append(addr)
+
+    def getsockname(self):
+        return ("0.0.0.0", 55555)
+
+    def sendto(self, data, addr):
+        self.sent.append((data, addr))
+
+    def recvfrom(self, size):
+        status = {
+            "workers": [{
+                "node_id": "worker-1",
+                "address": "192.168.100.11",
+                "models": ["llama3:8b"],
+                "compute_score": 100,
+            }]
+        }
+        return json.dumps(status).encode(), ("192.168.1.5", 8765)
+
+
 # --- Sprint 1: Hardware Detection ---
 
 class TestHardwareDetection:
@@ -462,6 +496,45 @@ class TestModelDiscovery:
         models = registry.discover_ollama_models()
         assert [model.name for model in models] == ["phi3:mini"]
         assert models[0].model_type == "ollama"
+
+
+class TestInferenceProxy:
+    def test_controller_status_query_uses_bound_callback_port(self, monkeypatch):
+        import scripts.start_inference as inference
+
+        StatusQuerySocket.sent = []
+        StatusQuerySocket.bound = []
+        monkeypatch.setattr(inference, "load_config", lambda: {"controller_ip": "192.168.1.5"})
+        monkeypatch.setattr(inference, "get_local_ip", lambda: "192.168.1.50")
+        monkeypatch.setattr(inference.socket, "socket", lambda *args, **kwargs: StatusQuerySocket())
+
+        proxy = inference.ClusterProxy()
+        status = proxy._query_controller_status(8765)
+
+        assert status["workers"][0]["models"] == ["llama3:8b"]
+        payload = json.loads(StatusQuerySocket.sent[0][0].decode())
+        assert payload["status_callback"] == {"address": "192.168.1.50", "port": 55555}
+        assert StatusQuerySocket.sent[0][1] == ("192.168.1.5", 8765)
+
+    def test_cluster_discovery_retries_until_models_are_advertised(self, monkeypatch):
+        import scripts.start_inference as inference
+
+        statuses = [
+            {"workers": [{"node_id": "worker-1", "address": "192.168.100.11", "models": []}]},
+            {"workers": [{"node_id": "worker-1", "address": "192.168.100.11", "models": ["phi3:mini"]}]},
+        ]
+
+        proxy = inference.ClusterProxy()
+        monkeypatch.setattr(proxy, "_query_controller_status", lambda port: statuses.pop(0))
+        monkeypatch.setattr(proxy, "_get_worker_ollama_models", lambda address, port: [])
+        monkeypatch.setattr(inference.time, "sleep", lambda seconds: None)
+
+        best = proxy.discover_cluster(8765, wait_seconds=2)
+        status = proxy.get_status()
+
+        assert best["node_id"] == "worker-1"
+        assert status["best_model"] == "phi3:mini"
+        assert status["all_models"] == ["phi3:mini"]
 
 
 if __name__ == "__main__":
