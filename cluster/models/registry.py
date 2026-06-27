@@ -147,7 +147,15 @@ def discover_ollama_models() -> list[ModelInfo]:
                 model_path = os.path.join(org_path, model_dir)
                 if not os.path.isdir(model_path):
                     continue
+                # Skip models that don't have actual model files
+                # (manifests are just metadata — check for blobs)
+                blobs_path = os.path.join(ollama_models_path, "blobs")
+                if not os.path.isdir(blobs_path):
+                    continue
                 size_mb = _dir_size_mb(model_path)
+                if size_mb < 10:
+                    # Likely just a manifest without actual model data
+                    continue
                 # Clean up model name for Ollama API
                 if org_dir == "library":
                     model_name = model_dir
