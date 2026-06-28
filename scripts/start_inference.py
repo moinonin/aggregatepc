@@ -153,13 +153,13 @@ class ClusterProxy:
         """
         config = load_config()
         backend_overrides = config.get("ollama_backends", {})
-        relay_workers = _query_relay_workers(config)
         self.controller_port = controller_port
         deadline = time.time() + wait_seconds
 
         while True:
             # Query controller status to get worker addresses
             status = self._query_controller_status(controller_port)
+            relay_workers = _query_relay_workers(config)
             nodes = []
             best_node = None
             best_model = None

@@ -55,16 +55,25 @@ class RelayState:
 
     def register_worker(self, payload: dict) -> None:
         node_id = payload["node_id"]
+        joined = False
+        models_changed = False
         with self._lock:
             worker = self._workers.get(node_id)
             if not worker:
                 worker = RelayWorker(node_id=node_id)
                 self._workers[node_id] = worker
+                joined = True
+            previous_models = set(worker.models)
             worker.hardware = payload.get("hardware", worker.hardware)
             worker.models = payload.get("models", worker.models)
             worker.status = payload.get("status", worker.status)
             worker.compute_score = payload.get("compute_score", worker.compute_score)
             worker.last_seen = time.time()
+            models_changed = previous_models != set(worker.models)
+        if joined:
+            print(f"[aggregatepc] Relay worker joined: {node_id} ({len(worker.models)} model(s))")
+        elif models_changed:
+            print(f"[aggregatepc] Relay worker updated models: {node_id} ({len(worker.models)} model(s))")
 
     def update_worker(self, payload: dict) -> None:
         self.register_worker(payload)

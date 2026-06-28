@@ -532,6 +532,35 @@ defi = 192.168.1.2:11436
         assert config["ollama_backends"]["defi"] == {"host": "192.168.1.2", "port": 11436}
 
 
+class TestCliStatus:
+    def test_status_merges_relay_only_workers(self):
+        import aggregatepc
+
+        status = {"workers": [], "worker_count": 0, "available_count": 0}
+        relay_status = {
+            "workers": [{
+                "node_id": "nr-dell",
+                "status": "idle",
+                "hardware": {"cpu_cores": 8, "ram_mb": 15879, "gpus": []},
+                "models": ["qwen2.5-coder:7b"],
+                "compute_score": 95.51,
+                "last_seen": 123.0,
+                "connected": True,
+            }],
+            "worker_count": 1,
+            "available_count": 1,
+        }
+
+        merged = aggregatepc._merge_relay_status(status, relay_status)
+        aggregatepc._add_cluster_metrics(merged)
+
+        assert merged["worker_count"] == 1
+        assert merged["available_count"] == 1
+        assert merged["workers"][0]["node_id"] == "nr-dell"
+        assert merged["workers"][0]["relay_connected"] is True
+        assert merged["cluster_metrics"]["available_models"] == ["qwen2.5-coder:7b"]
+
+
 class TestModelDiscovery:
     def test_discover_returns_list(self):
         from cluster.models.registry import discover_all_models

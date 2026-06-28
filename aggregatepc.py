@@ -129,7 +129,6 @@ def cmd_status(args: argparse.Namespace) -> None:
     """Query cluster status from controller."""
     import json
     import socket
-    from urllib.request import urlopen
     from cluster.config import load_config
 
     file_config = load_config(args.config)
@@ -137,6 +136,8 @@ def cmd_status(args: argparse.Namespace) -> None:
     # Status queries go to the controller's main port (8765), not a separate port
     port = args.port if args.port != 8765 else file_config.get("controller_port", 8765)
     local_ip = _get_local_ip()
+
+    relay_port = file_config.get("relay_port", 8767)
 
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -150,44 +151,107 @@ def cmd_status(args: argparse.Namespace) -> None:
             s.sendto(msg, (controller_addr, port))
             data, _ = s.recvfrom(8192)
             status = json.loads(data.decode())
+            relay_status = _query_relay_status(controller_addr, relay_port)
+            status = _merge_relay_status(status, relay_status)
 
             # Enhance output with cluster metrics
-            workers = status.get("workers", [])
-            if workers:
-                total_cores = sum(w.get("hardware", {}).get("cpu_cores", 0) for w in workers)
-                total_ram = sum(w.get("hardware", {}).get("ram_mb", 0) for w in workers)
-                total_vram = sum(
-                    sum(g.get("vram_mb", 0) for g in w.get("hardware", {}).get("gpus", []))
-                    for w in workers
-                )
-                all_models = set()
-                for w in workers:
-                    for m in w.get("models", []):
-                        all_models.add(m)
-
-                status["cluster_metrics"] = {
-                    "total_cpu_cores": total_cores,
-                    "total_ram_mb": total_ram,
-                    "total_ram_gb": round(total_ram / 1024, 1),
-                    "total_vram_mb": total_vram,
-                    "total_vram_gb": round(total_vram / 1024, 1),
-                    "total_models": len(all_models),
-                    "available_models": sorted(all_models),
-                }
+            _add_cluster_metrics(status)
 
             print(json.dumps(status, indent=2))
     except socket.timeout:
-        relay_port = file_config.get("relay_port", 8767)
-        try:
-            with urlopen(f"http://{controller_addr}:{relay_port}/status", timeout=5) as resp:
-                print(json.dumps(json.loads(resp.read().decode()), indent=2))
-                return
-        except Exception:
+        relay_status = _query_relay_status(controller_addr, relay_port)
+        if relay_status:
+            _add_cluster_metrics(relay_status)
+            print(json.dumps(relay_status, indent=2))
+            return
+        else:
             print(f"[aggregatepc] No response from controller at {controller_addr}:{port} or relay at {controller_addr}:{relay_port}")
             sys.exit(1)
     except Exception as e:
         print(f"[aggregatepc] Error: {e}")
         sys.exit(1)
+
+
+def _query_relay_status(controller_addr: str, relay_port: int) -> dict | None:
+    """Query relay status, returning None if relay is unreachable."""
+    import json
+    from urllib.request import urlopen
+
+    try:
+        with urlopen(f"http://{controller_addr}:{relay_port}/status", timeout=2) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return None
+
+
+def _merge_relay_status(status: dict, relay_status: dict | None) -> dict:
+    """Merge relay-only workers into controller status."""
+    if not relay_status:
+        return status
+
+    workers = {worker.get("node_id"): worker for worker in status.get("workers", [])}
+    for relay_worker in relay_status.get("workers", []):
+        node_id = relay_worker.get("node_id")
+        if not node_id:
+            continue
+        if node_id in workers:
+            workers[node_id]["relay_connected"] = relay_worker.get("connected", False)
+            if relay_worker.get("models"):
+                workers[node_id]["models"] = relay_worker["models"]
+            continue
+        workers[node_id] = {
+            "node_id": node_id,
+            "role": "worker",
+            "status": relay_worker.get("status", "idle"),
+            "address": None,
+            "hardware": relay_worker.get("hardware", {}),
+            "compute_score": relay_worker.get("compute_score", 0),
+            "last_heartbeat": relay_worker.get("last_seen"),
+            "models": relay_worker.get("models", []),
+            "relay_connected": relay_worker.get("connected", False),
+        }
+
+    merged_workers = list(workers.values())
+    status["workers"] = merged_workers
+    status["worker_count"] = len(merged_workers)
+    status["available_count"] = sum(
+        1
+        for worker in merged_workers
+        if worker.get("relay_connected", True) and worker.get("status") in ("idle", "online")
+    )
+    status["relay"] = {
+        "worker_count": relay_status.get("worker_count", 0),
+        "available_count": relay_status.get("available_count", 0),
+    }
+    return status
+
+
+def _add_cluster_metrics(status: dict) -> None:
+    """Add aggregate hardware/model metrics to status output."""
+    workers = status.get("workers", [])
+    if not workers:
+        return
+
+    total_cores = sum(w.get("hardware", {}).get("cpu_cores", 0) for w in workers)
+    total_ram = sum(w.get("hardware", {}).get("ram_mb", 0) for w in workers)
+    total_vram = sum(
+        sum(g.get("vram_mb", 0) for g in w.get("hardware", {}).get("gpus", []))
+        for w in workers
+    )
+    all_models = set()
+    for worker in workers:
+        for model in worker.get("models", []):
+            all_models.add(model)
+
+    status["cluster_metrics"] = {
+        "total_cpu_cores": total_cores,
+        "total_ram_mb": total_ram,
+        "total_ram_gb": round(total_ram / 1024, 1),
+        "total_vram_mb": total_vram,
+        "total_vram_gb": round(total_vram / 1024, 1),
+        "total_models": len(all_models),
+        "available_models": sorted(all_models),
+    }
 
 
 def main() -> None:
