@@ -14,6 +14,7 @@ help: ## Show this help message
 	@echo "  make controller          Start this machine as the cluster controller"
 	@echo "  make worker               Start as a worker (auto-discover controller)"
 	@echo "  make worker CONTROLLER=192.168.1.5  Join a specific controller"
+	@echo "  make worker CONTROLLER=192.168.1.5 RELAY_PORT=8767  Join with relay port"
 	@echo "  make profile              Detect hardware and scan for cluster"
 	@echo "  make status               Show cluster status (uses controller IP from config)"
 	@echo "  make inference            Start inference with best available model"
@@ -21,13 +22,13 @@ help: ## Show this help message
 	@echo ""
 
 controller: ## Start this machine as the cluster controller
-	python3 aggregatepc.py controller
+	python3 aggregatepc.py controller --port $(or $(PORT),$(shell python3 -c "import sys; sys.path.insert(0, '.'); from cluster.config import load_config; print(load_config().get('controller_port',8765))")) --relay-port $(or $(RELAY_PORT),$(shell python3 -c "import sys; sys.path.insert(0, '.'); from cluster.config import load_config; print(load_config().get('relay_port',8767))"))
 
 worker: ## Start as a worker node (auto-discover controller or set CONTROLLER=<IP>)
 	@if [ -n "$(CONTROLLER)" ]; then \
-		python3 aggregatepc.py worker --controller $(CONTROLLER); \
+		python3 aggregatepc.py worker --controller $(CONTROLLER) --port $(or $(PORT),$(shell python3 -c "import sys; sys.path.insert(0, '.'); from cluster.config import load_config; print(load_config().get('controller_port',8765))")) --relay-port $(or $(RELAY_PORT),$(shell python3 -c "import sys; sys.path.insert(0, '.'); from cluster.config import load_config; print(load_config().get('relay_port',8767))")); \
 	else \
-		python3 aggregatepc.py worker; \
+		python3 aggregatepc.py worker --port $(or $(PORT),$(shell python3 -c "import sys; sys.path.insert(0, '.'); from cluster.config import load_config; print(load_config().get('controller_port',8765))")) --relay-port $(or $(RELAY_PORT),$(shell python3 -c "import sys; sys.path.insert(0, '.'); from cluster.config import load_config; print(load_config().get('relay_port',8767))")); \
 	fi
 
 profile: ## Profile hardware and optionally scan network

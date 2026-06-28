@@ -71,9 +71,10 @@ def cmd_worker(args: argparse.Namespace) -> None:
                 print("[aggregatepc] No controller found. Use --controller <IP> or set it in configs/cluster.conf")
                 sys.exit(1)
 
+    controller_port = args.port if args.port != 8765 else file_config.get("controller_port", 8765)
     relay_port = args.relay_port if args.relay_port != 8767 else file_config.get("relay_port", 8767)
     worker_config = WorkerConfig(
-        controller_port=args.port,
+        controller_port=controller_port,
         relay_port=relay_port,
         worker=IdleThreshold(
             cpu_percent_max=args.cpu_threshold,
@@ -84,7 +85,7 @@ def cmd_worker(args: argparse.Namespace) -> None:
 
     daemon = WorkerDaemon(config=worker_config)
 
-    print(f"[aggregatepc] Joining controller at {controller}:{args.port}...")
+    print(f"[aggregatepc] Joining controller at {controller}:{controller_port}...")
     if daemon.join(controller):
         print("[aggregatepc] Joined! Contributing idle compute to the cluster.")
         print("[aggregatepc] Press Ctrl+C to stop.")

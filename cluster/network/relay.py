@@ -235,6 +235,8 @@ class RelayWorkerClient:
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self._running = False
         self._thread: Optional[threading.Thread] = None
+        self._registered = False
+        self._last_error_log = 0.0
 
     @property
     def base_url(self) -> str:
@@ -258,11 +260,18 @@ class RelayWorkerClient:
                 self._register()
                 self._poll_once()
             except Exception as e:
+                now = time.time()
+                if now - self._last_error_log > 15:
+                    print(f"[aggregatepc] Relay connection failed: {self.base_url} ({e})")
+                    self._last_error_log = now
                 logger.debug("Relay worker loop failed: %s", e)
                 time.sleep(self.heartbeat_interval_seconds)
 
     def _register(self) -> None:
         self._post("/worker/register", self._node_payload(), timeout=5)
+        if not self._registered:
+            print(f"[aggregatepc] Relay connected: {self.base_url}")
+            self._registered = True
 
     def _poll_once(self) -> None:
         payload = {"node_id": self.node.node_id, "timeout": 20}

@@ -293,6 +293,7 @@ class WorkerDaemon:
                     heartbeat_interval_seconds=self.config.heartbeat_interval_seconds,
                 )
                 self._relay_client.start()
+                print(f"[aggregatepc] Relay client connecting to {self._relay_client.base_url}")
                 logger.info("Relay client started")
             except Exception as e:
                 logger.debug(f"Relay client did not start: {e}")
