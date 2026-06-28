@@ -117,7 +117,120 @@ Enable true distributed compute by splitting models across nodes and falling bac
 
 ---
 
-## Sprint 7: Production Hardening & Community Release
+## Sprint 7: Inference Proxy & Cluster-Wide Model Routing ✅
+
+### Objective
+Enable any node to inference any model in the cluster, regardless of which node has the model locally. The proxy discovers models across the cluster and routes requests to the best available backend.
+
+### Completed
+- [x] `scripts/start_inference.py` - Cluster inference proxy with `--broadcast` mode
+- [x] `ClusterProxy` class - Discovers models across workers via controller status + direct Ollama API checks
+- [x] `ProxyHandler` - HTTP proxy that routes `/v1/chat/completions` and `/api/generate` to best node
+- [x] Proxy queries controller status endpoint to get worker addresses and models
+- [x] Proxy directly checks each worker's `/api/tags` for additional models
+- [x] Auto-selects best model (largest, prefers Ollama, must be reachable)
+- [x] Model auto-routing: client sends `"model":"any"` and proxy substitutes the best model
+- [x] `/status` endpoint shows cluster-wide model availability
+- [x] `/v1/models` endpoint lists available models (OpenAI-compatible)
+- [x] Workers re-advertise models after Ollama starts (delayed heartbeat)
+- [x] Heartbeat handler stores models from heartbeat messages
+- [x] Makefile `make status` reads controller IP from config
+- [x] README updated with correct inference commands and network configuration
+
+### Architecture
+```
+Client → Proxy (:8000) → Controller status query → Worker Ollama (:11434)
+         ↓
+    Discovers best model across cluster
+         ↓
+    Routes request to worker that has the model
+         ↓
+    Returns response to client
+```
+
+### Key Features
+- **No model pulling required** — Uses models already on workers
+- **Cross-machine inference** — 8GB GPU machine can inference 70B model via cluster
+- **Automatic failover** — Only selects from reachable backends
+- **OpenAI-compatible API** — Works with any OpenAI client
+
+---
+
+## Sprint 8: External IP & WAN Support (Current)
+
+### Objective
+Enable the cluster to span multiple networks and external IP addresses, allowing workers in different locations to contribute compute resources.
+
+### Tasks
+- [ ] **Config-based external IP support** — Already works; just update `configs/cluster.conf` with external IPs
+- [ ] **Port forwarding guide** — Document NAT traversal for workers behind routers
+- [ ] **Relay/TURN server** — For workers behind restrictive NAT/firewalls
+- [ ] **TLS encryption** — Encrypt all communications (controller ↔ worker, proxy ↔ Ollama)
+- [ ] **Token authentication** — Secure cluster join and inference endpoints
+- [ ] **STUN/TURN for NAT traversal** — Auto-detect and punch through NAT
+- [ ] **Dynamic worker discovery** — DNS-based or DHT-based discovery without config files
+- [ ] **Bandwidth-aware routing** — Prefer local workers for large models, remote for small
+- [ ] **Connection multiplexing** — Single persistent connection per worker instead of UDP
+- [ ] **Compression** — Compress model responses for WAN links
+
+### Architecture for Multi-Network
+```
+Home Network                    Office Network
+┌──────────────┐               ┌──────────────┐
+│ Controller   │◄──────────────│ Worker C     │
+│ :8765        │  WAN/VPN      │ External IP  │
+│              │               │              │
+│ Worker A     │               │ Worker D     │
+│ 192.168.1.x  │               │ 10.0.0.x     │
+│              │               │              │
+│ Worker B     │               │              │
+│ 192.168.1.x  │               │              │
+└──────────────┘               └──────────────┘
+```
+
+### Implementation Plan
+
+#### Phase 1: Network Infrastructure
+1. Add `network_mode` to config (`lan` or `wan`)
+2. For WAN mode, add `relay_address` for TURN server
+3. Implement connection health checks with latency reporting
+4. Add bandwidth estimation for routing decisions
+
+#### Phase 2: Security
+1. TLS certificate generation and distribution
+2. Token-based authentication for worker join
+3. API key authentication for inference proxy
+4. Encrypted heartbeat messages
+
+#### Phase 3: NAT Traversal
+1. STUN client for public IP discovery
+2. UDP hole punching for direct connections
+3. TURN relay fallback for symmetric NAT
+4. Auto-detection of NAT type
+
+#### Phase 4: WAN Optimization
+1. Response compression (gzip)
+2. Connection pooling and keep-alive
+3. Latency-based routing (prefer nearby workers)
+4. Chunked transfer for large responses
+
+### Configuration Additions
+```ini
+[network]
+mode = lan                    # lan or wan
+relay_address =               # TURN server address (WAN mode)
+stun_server = stun.l.google.com:19302
+tls_enabled = false
+
+[security]
+auth_token =                  # Cluster join token
+api_key =                     # Inference API key
+tls_cert =                    # Path to TLS certificate
+```
+
+---
+
+## Sprint 9: Production Hardening & Community Release
 
 ### Objective
 Make the system stable for everyday use and easy for others to set up.
@@ -125,10 +238,14 @@ Make the system stable for everyday use and easy for others to set up.
 ### Tasks
 - [ ] Cross-platform installer script
 - [ ] Auto-update mechanism for workers
-- [ ] Security: encrypted task communication, token authentication
 - [ ] Web dashboard for cluster monitoring
 - [ ] Documentation: "Set up your old laptop in 5 minutes or less"
 - [ ] Example configs for common use cases (LLM inference, video encoding, etc.)
+- [ ] Docker/Podman support for containerized deployment
+- [ ] Systemd/launchd service files for auto-start
+- [ ] Health check endpoint for monitoring
+- [ ] Prometheus metrics export
+- [ ] CLI improvements (colored output, progress bars, interactive mode)
 
 ---
 
@@ -140,3 +257,4 @@ Make the system stable for everyday use and easy for others to set up.
 4. **No Cloud Required** - Everything runs on local network, no external dependencies
 5. **Plug & Play** - Auto-discovery and zero-config setup whenever possible
 6. **Decentralized Compute** - Models and tasks should be distributed across all available nodes
+7. **External IP Ready** - Cluster should span networks with minimal configuration
