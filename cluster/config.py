@@ -28,6 +28,7 @@ def load_config(config_path: Optional[str] = None) -> dict:
         - status_port: int
         - proxy_host: str | None
         - proxy_port: int
+        - relay_port: int
         - ollama_backends: dict[str, dict]
     """
     path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
@@ -39,6 +40,7 @@ def load_config(config_path: Optional[str] = None) -> dict:
         "status_port": DEFAULT_WORKER_PORT + 1,
         "proxy_host": None,
         "proxy_port": 8000,
+        "relay_port": 8767,
         "ollama_backends": {},
     }
 
@@ -73,6 +75,8 @@ def load_config(config_path: Optional[str] = None) -> dict:
                                 config["status_port"] = int(value)
                             elif key == "proxy_port":
                                 config["proxy_port"] = int(value)
+                            elif key == "relay_port":
+                                config["relay_port"] = int(value)
                         except ValueError:
                             print(f"[aggregatepc] Warning: invalid port value at line {line_num}: {line}")
                     elif current_section == "proxy":
@@ -160,6 +164,7 @@ def save_default_config(config_path: Optional[str] = None) -> str:
 # controller_port = 8765
 # status_port = 8766
 # proxy_port = 8000
+# relay_port = 8767
 
 [proxy]
 # Optional: force the proxy bind address

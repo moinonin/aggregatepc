@@ -89,6 +89,7 @@ You'll see output like:
 ```
 [aggregatepc] Starting controller on port 8765...
 [aggregatepc] Controller IP: 192.168.1.5
+[aggregatepc] Relay endpoint: http://192.168.1.5:8767
 [aggregatepc] Config has 2 worker(s): 192.168.1.10, 192.168.1.11
 [aggregatepc] Workers can join with: aggregatepc worker
 ```
@@ -150,18 +151,18 @@ Output:
 
 ### 7. Start inference
 
-Once workers have joined and Ollama is running:
+Once workers have joined and Ollama is running, start the cluster proxy:
 
 ```bash
-# Test directly against a worker's Ollama (from any machine on the network)
-curl http://192.168.100.11:11434/api/generate -d '{"model":"qwen2.5-coder:3b","prompt":"Hello","stream":false}'
-curl http://192.168.100.31:11434/api/generate -d '{"model":"qwen2.5-coder:7b","prompt":"Hello","stream":false}'
-
-# Or start the cluster proxy (routes to best model automatically)
 make inference
-# Then test through the proxy:
+
+# Test through the proxy:
 curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"any","messages":[{"role":"user","content":"Hello"}]}'
 ```
+
+Workers keep an outbound relay connection to the controller on port `8767`.
+That means inference can work even when the controller cannot directly reach
+the worker's `11434` Ollama port, such as behind NAT or on another subnet.
 
 ---
 
@@ -171,7 +172,8 @@ curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/jso
 
 - Python 3.10+
 - Windows 10+, Linux (any modern distro), or macOS 12+
-- All machines on the same local network (same subnet)
+- All machines on the same local network for UDP discovery, or workers must be
+  able to make outbound HTTP connections to the controller relay
 - **Ollama** (required for LLM inference) — https://ollama.com/download
 - No other external dependencies
 
@@ -204,10 +206,12 @@ Verify Ollama is working:
 ollama version
 ```
 
-### Configure Ollama for network access
+### Configure Ollama
 
-Ollama binds to `127.0.0.1` (localhost) by default. For cluster inference,
-it must listen on all interfaces so other nodes can reach it.
+Relay mode calls Ollama locally from each worker, so Ollama can stay bound to
+`127.0.0.1:11434`. Only configure Ollama for network access if you want the
+legacy direct-LAN proxy path where the controller connects to worker Ollama
+ports directly.
 
 **macOS:**
 ```bash
@@ -251,7 +255,7 @@ sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp /usr/local/bin
 
 Verify network access:
 ```bash
-# From another machine on the network:
+# Only needed for direct-LAN mode. From another machine on the network:
 curl http://<ollama-host-ip>:11434/api/tags
 ```
 

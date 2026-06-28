@@ -23,9 +23,11 @@ def cmd_controller(args: argparse.Namespace) -> None:
 
     file_config = load_config(args.config)
     port = args.port if args.port != 8765 else file_config.get("controller_port", 8765)
+    relay_port = args.relay_port if args.relay_port != 8767 else file_config.get("relay_port", 8767)
 
     print(f"[aggregatepc] Starting controller on port {port}...")
     print(f"[aggregatepc] Controller IP: {get_local_ip()}")
+    print(f"[aggregatepc] Relay endpoint: http://{get_local_ip()}:{relay_port}")
 
     workers = file_config.get("worker_ips", [])
     if workers:
@@ -34,8 +36,14 @@ def cmd_controller(args: argparse.Namespace) -> None:
     else:
         print(f"[aggregatepc] Workers can join with: aggregatepc worker --controller {get_local_ip()}")
 
-    controller = ClusterController(port=port)
-    controller.run_forever()
+    from cluster.network.relay import start_relay_server
+
+    relay = start_relay_server(port=relay_port)
+    try:
+        controller = ClusterController(port=port)
+        controller.run_forever()
+    finally:
+        relay.shutdown()
 
 
 def cmd_worker(args: argparse.Namespace) -> None:
@@ -63,8 +71,10 @@ def cmd_worker(args: argparse.Namespace) -> None:
                 print("[aggregatepc] No controller found. Use --controller <IP> or set it in configs/cluster.conf")
                 sys.exit(1)
 
+    relay_port = args.relay_port if args.relay_port != 8767 else file_config.get("relay_port", 8767)
     worker_config = WorkerConfig(
         controller_port=args.port,
+        relay_port=relay_port,
         worker=IdleThreshold(
             cpu_percent_max=args.cpu_threshold,
             memory_percent_max=args.mem_threshold,
@@ -79,8 +89,9 @@ def cmd_worker(args: argparse.Namespace) -> None:
         print("[aggregatepc] Joined! Contributing idle compute to the cluster.")
         print("[aggregatepc] Press Ctrl+C to stop.")
     else:
-        print("[aggregatepc] Failed to join controller.")
-        sys.exit(1)
+        print("[aggregatepc] UDP join failed; continuing with relay mode.")
+        print(f"[aggregatepc] Relay endpoint: http://{controller}:{relay_port}")
+        print("[aggregatepc] Press Ctrl+C to stop.")
 
     daemon.run_forever()
 
@@ -118,6 +129,7 @@ def cmd_status(args: argparse.Namespace) -> None:
     """Query cluster status from controller."""
     import json
     import socket
+    from urllib.request import urlopen
     from cluster.config import load_config
 
     file_config = load_config(args.config)
@@ -165,8 +177,14 @@ def cmd_status(args: argparse.Namespace) -> None:
 
             print(json.dumps(status, indent=2))
     except socket.timeout:
-        print(f"[aggregatepc] No response from controller at {controller_addr}:{port}")
-        sys.exit(1)
+        relay_port = file_config.get("relay_port", 8767)
+        try:
+            with urlopen(f"http://{controller_addr}:{relay_port}/status", timeout=5) as resp:
+                print(json.dumps(json.loads(resp.read().decode()), indent=2))
+                return
+        except Exception:
+            print(f"[aggregatepc] No response from controller at {controller_addr}:{port} or relay at {controller_addr}:{relay_port}")
+            sys.exit(1)
     except Exception as e:
         print(f"[aggregatepc] Error: {e}")
         sys.exit(1)
@@ -190,11 +208,13 @@ def main() -> None:
     # Controller subcommand
     p_controller = subparsers.add_parser("controller", help="Start as cluster controller")
     p_controller.add_argument("--port", type=int, default=8765, help="UDP port (default: from config or 8765)")
+    p_controller.add_argument("--relay-port", type=int, default=8767, help="Relay HTTP port (default: from config or 8767)")
 
     # Worker subcommand
     p_worker = subparsers.add_parser("worker", help="Start as worker node")
     p_worker.add_argument("--controller", type=str, default=None, help="Controller IP (from config if omitted)")
     p_worker.add_argument("--port", type=int, default=8765, help="Controller port (default: from config or 8765)")
+    p_worker.add_argument("--relay-port", type=int, default=8767, help="Controller relay HTTP port (default: from config or 8767)")
     p_worker.add_argument("--cpu-threshold", type=float, default=25.0, help="Max CPU %% for idle (default: 25.0)")
     p_worker.add_argument("--mem-threshold", type=float, default=75.0, help="Max memory %% for idle (default: 75.0)")
     p_worker.add_argument("--idle-duration", type=float, default=30.0, help="Seconds idle before work (default: 30.0)")

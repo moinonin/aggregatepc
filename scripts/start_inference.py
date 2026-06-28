@@ -153,6 +153,7 @@ class ClusterProxy:
         """
         config = load_config()
         backend_overrides = config.get("ollama_backends", {})
+        relay_workers = _query_relay_workers(config)
         self.controller_port = controller_port
         deadline = time.time() + wait_seconds
 
@@ -167,24 +168,46 @@ class ClusterProxy:
 
             if status:
                 workers = status.get("workers", [])
+            else:
+                workers = []
+
+            if not workers and relay_workers:
+                workers = [
+                    {
+                        "node_id": worker["node_id"],
+                        "address": None,
+                        "advertised_address": None,
+                        "models": worker.get("models", []),
+                        "hardware": worker.get("hardware", {}),
+                        "compute_score": worker.get("compute_score", 0),
+                    }
+                    for worker in relay_workers.values()
+                    if worker.get("connected")
+                ]
+
+            if workers:
                 for worker_info in workers:
                     backend_candidates = _worker_backend_candidates(worker_info, backend_overrides)
-                    if not backend_candidates:
+                    node_id = worker_info.get("node_id", worker_info.get("hostname", "unknown"))
+                    relay_worker = relay_workers.get(node_id)
+                    relay_reachable = bool(relay_worker and relay_worker.get("connected"))
+                    if not backend_candidates and not relay_reachable:
                         continue
 
                     # Get models advertised by this worker
                     worker_models = worker_info.get("models", [])
 
                     # Also check if worker's Ollama is reachable via API
-                    backend, ollama_models = self._find_reachable_ollama(backend_candidates)
+                    backend, ollama_models = self._find_reachable_ollama(backend_candidates) if backend_candidates else (None, None)
                     backend_reachable = ollama_models is not None
-                    selected_backend = backend or backend_candidates[0]
+                    selected_backend = backend or (backend_candidates[0] if backend_candidates else {"host": None, "port": 11434})
 
                     # Combine: prefer explicitly advertised models, fall back to Ollama API
-                    all_models = sorted(set(worker_models + (ollama_models or [])))
+                    relay_models = relay_worker.get("models", []) if relay_worker else []
+                    all_models = sorted(set(worker_models + relay_models + (ollama_models or [])))
 
                     nodes.append({
-                        "node_id": worker_info.get("node_id", worker_info.get("hostname", "unknown")),
+                        "node_id": node_id,
                         "address": selected_backend["host"],
                         "observed_address": worker_info.get("address"),
                         "advertised_address": worker_info.get("advertised_address"),
@@ -193,6 +216,8 @@ class ClusterProxy:
                         "advertised_models": worker_models,
                         "backend_models": ollama_models or [],
                         "backend_reachable": backend_reachable,
+                        "relay_reachable": relay_reachable,
+                        "relay_url": _relay_url(config),
                         "compute_score": worker_info.get("compute_score", 0),
                         "ollama_port": selected_backend["port"],
                     })
@@ -204,7 +229,7 @@ class ClusterProxy:
                 # Find best model across cluster
                 all_model_infos = []
                 for node in nodes:
-                    if not node["backend_reachable"]:
+                    if not (node["backend_reachable"] or node["relay_reachable"]):
                         continue
                     for model_name in node["models"]:
                         clean_name = model_name.replace("ollama://", "")
@@ -296,6 +321,7 @@ class ClusterProxy:
                         "advertised_address": node["advertised_address"],
                         "candidate_addresses": node["candidate_addresses"],
                         "reachable": node["backend_reachable"],
+                        "relay_reachable": node["relay_reachable"],
                         "advertised_models": node["advertised_models"],
                         "backend_models": node["backend_models"],
                     }
@@ -304,7 +330,7 @@ class ClusterProxy:
                 "available_models": list(set(
                     m.replace("ollama://", "")
                     for node in self._nodes
-                    if node["backend_reachable"]
+                    if node["backend_reachable"] or node["relay_reachable"]
                     for m in node["models"]
                 )),
                 "all_models": list(set(
@@ -332,6 +358,8 @@ class ClusterProxy:
         with self._lock:
             node = self._advertised_model_to_node.get(normalized)
             if node and not node["backend_reachable"]:
+                if node.get("relay_reachable"):
+                    return f"Model is advertised but direct backend is unreachable; relay should handle it: {normalized}"
                 return (
                     f"Model is advertised but backend is unreachable: {normalized} "
                     f"on {node['node_id']} ({node['address']}:{node.get('ollama_port', 11434)})"
@@ -388,21 +416,34 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
             body = self._with_target_model(body, target, target_model)
 
-            # Determine target endpoint
-            if self.path == "/v1/chat/completions":
-                target_url = f"http://{target['address']}:{target.get('ollama_port', 11434)}/v1/chat/completions"
-            else:
-                target_url = f"http://{target['address']}:{target.get('ollama_port', 11434)}/api/generate"
-
             try:
-                req = Request(target_url, data=body, headers=dict(self.headers))
-                with urlopen(req, timeout=120) as resp:
-                    self.send_response(resp.status)
-                    for header, value in resp.getheaders():
-                        if header.lower() not in ("transfer-encoding", "connection"):
-                            self.send_header(header, value)
+                if target.get("backend_reachable"):
+                    # Determine target endpoint
+                    if self.path == "/v1/chat/completions":
+                        target_url = f"http://{target['address']}:{target.get('ollama_port', 11434)}/v1/chat/completions"
+                    else:
+                        target_url = f"http://{target['address']}:{target.get('ollama_port', 11434)}/api/generate"
+
+                    req = Request(target_url, data=body, headers=dict(self.headers))
+                    with urlopen(req, timeout=120) as resp:
+                        self.send_response(resp.status)
+                        for header, value in resp.getheaders():
+                            if header.lower() not in ("transfer-encoding", "connection"):
+                                self.send_header(header, value)
+                        self.end_headers()
+                        self.wfile.write(resp.read())
+                elif target.get("relay_reachable"):
+                    result = _submit_relay_job(target, self.path, body, dict(self.headers))
+                    status = int(result.get("status", 502))
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
                     self.end_headers()
-                    self.wfile.write(resp.read())
+                    if result.get("ok"):
+                        self.wfile.write(result.get("body", "").encode())
+                    else:
+                        self.wfile.write(json.dumps({"error": result.get("error", "Relay backend error")}).encode())
+                else:
+                    raise RuntimeError("Selected backend is not reachable directly or via relay")
             except Exception as e:
                 self.send_response(502)
                 self.send_header("Content-Type", "application/json")
@@ -497,6 +538,51 @@ def _backend_from_host_port(value: Optional[str], default_port: int) -> dict:
 
 def _format_backend_candidate(candidate: dict) -> str:
     return f"{candidate['host']}:{candidate['port']}"
+
+
+def _relay_url(config: dict) -> str:
+    controller_ip = config.get("controller_ip", "127.0.0.1")
+    relay_port = config.get("relay_port", 8767)
+    return f"http://{controller_ip}:{relay_port}"
+
+
+def _query_relay_workers(config: dict) -> dict[str, dict]:
+    """Return relay-connected workers keyed by node_id."""
+    try:
+        with urlopen(f"{_relay_url(config)}/status", timeout=2) as resp:
+            status = json.loads(resp.read().decode())
+    except Exception:
+        return {}
+    return {
+        worker.get("node_id"): worker
+        for worker in status.get("workers", [])
+        if worker.get("node_id")
+    }
+
+
+def _submit_relay_job(target: dict, path: str, body: bytes, headers: dict) -> dict:
+    """Submit an inference job through the controller relay."""
+    relay_url = target.get("relay_url")
+    if not relay_url:
+        return {"ok": False, "status": 503, "error": "Relay URL missing"}
+    payload = {
+        "node_id": target["node_id"],
+        "path": path,
+        "body": body.decode("utf-8", errors="replace"),
+        "headers": {
+            key: value
+            for key, value in headers.items()
+            if key.lower() not in ("host", "content-length", "connection")
+        },
+        "timeout": 120,
+    }
+    req = Request(
+        f"{relay_url}/proxy",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urlopen(req, timeout=130) as resp:
+        return json.loads(resp.read().decode())
 
 
 def start_proxy():

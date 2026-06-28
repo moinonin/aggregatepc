@@ -33,6 +33,7 @@ class IdleThreshold:
 class WorkerConfig:
     worker: IdleThreshold = field(default_factory=IdleThreshold)
     controller_port: int = 8765
+    relay_port: int = 8767
     heartbeat_interval_seconds: float = 10.0
     advertise_on_network: bool = True
 
@@ -95,6 +96,7 @@ class WorkerDaemon:
         self._heartbeat_thread: Optional[threading.Thread] = None
         self._idle_monitor_thread: Optional[threading.Thread] = None
         self._controller_address: Optional[str] = None
+        self._relay_client = None
 
     @property
     def is_available(self) -> bool:
@@ -280,6 +282,21 @@ class WorkerDaemon:
         # After Ollama is running, advertise models to controller
         threading.Thread(target=self._delayed_advertise, daemon=True).start()
 
+        # Keep an outbound relay connection for NAT-friendly inference.
+        if self._controller_address:
+            try:
+                from cluster.network.relay import RelayWorkerClient
+                self._relay_client = RelayWorkerClient(
+                    controller_address=self._controller_address,
+                    relay_port=self.config.relay_port,
+                    node=self.node,
+                    heartbeat_interval_seconds=self.config.heartbeat_interval_seconds,
+                )
+                self._relay_client.start()
+                logger.info("Relay client started")
+            except Exception as e:
+                logger.debug(f"Relay client did not start: {e}")
+
         logger.info("Worker daemon started")
 
     def _delayed_advertise(self) -> None:
@@ -341,6 +358,8 @@ class WorkerDaemon:
             self._heartbeat_thread.join(timeout=5.0)
         if self._idle_monitor_thread:
             self._idle_monitor_thread.join(timeout=5.0)
+        if self._relay_client:
+            self._relay_client.stop()
         logger.info("Worker daemon stopped")
 
     def run_forever(self) -> None:

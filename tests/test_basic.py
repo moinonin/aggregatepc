@@ -664,6 +664,11 @@ class TestInferenceProxy:
 
         tried = []
         proxy = inference.ClusterProxy()
+        monkeypatch.setattr(inference, "load_config", lambda: {
+            "controller_ip": "192.168.1.4",
+            "relay_port": 8767,
+            "ollama_backends": {},
+        })
         monkeypatch.setattr(proxy, "_query_controller_status", lambda port: {
             "workers": [{
                 "node_id": "nr-dell",
@@ -798,6 +803,111 @@ class TestInferenceProxy:
 
         assert target["node_id"] == "remote-worker"
         assert model == "qwen2.5-coder:7b"
+
+    def test_cluster_discovery_uses_relay_when_direct_backend_unreachable(self, monkeypatch):
+        import scripts.start_inference as inference
+
+        proxy = inference.ClusterProxy()
+        monkeypatch.setattr(inference, "load_config", lambda: {
+            "controller_ip": "192.168.1.4",
+            "relay_port": 8767,
+            "ollama_backends": {},
+        })
+        monkeypatch.setattr(proxy, "_query_controller_status", lambda port: {
+            "workers": [{
+                "node_id": "nr-dell",
+                "address": "192.168.1.2",
+                "advertised_address": "192.168.100.31",
+                "models": ["qwen2.5-coder:7b"],
+                "compute_score": 100,
+            }]
+        })
+        monkeypatch.setattr(proxy, "_get_worker_ollama_models", lambda address, port: None)
+        monkeypatch.setattr(inference, "_query_relay_workers", lambda config: {
+            "nr-dell": {
+                "node_id": "nr-dell",
+                "connected": True,
+                "models": ["qwen2.5-coder:7b"],
+            }
+        })
+
+        best = proxy.discover_cluster(8765, wait_seconds=0)
+        status = proxy.get_status()
+
+        assert best["node_id"] == "nr-dell"
+        assert best["relay_reachable"] is True
+        assert best["backend_reachable"] is False
+        assert "qwen2.5-coder:7b" in status["available_models"]
+
+    def test_cluster_discovery_can_use_relay_without_udp_workers(self, monkeypatch):
+        import scripts.start_inference as inference
+
+        proxy = inference.ClusterProxy()
+        monkeypatch.setattr(inference, "load_config", lambda: {
+            "controller_ip": "192.168.1.4",
+            "relay_port": 8767,
+            "ollama_backends": {},
+        })
+        monkeypatch.setattr(proxy, "_query_controller_status", lambda port: None)
+        monkeypatch.setattr(inference, "_query_relay_workers", lambda config: {
+            "remote-worker": {
+                "node_id": "remote-worker",
+                "connected": True,
+                "models": ["qwen2.5-coder:7b"],
+                "hardware": {},
+                "compute_score": 100,
+            }
+        })
+
+        best = proxy.discover_cluster(8765, wait_seconds=0)
+        target, model = proxy.select_target("qwen2.5-coder:7b")
+
+        assert best["node_id"] == "remote-worker"
+        assert target["relay_reachable"] is True
+        assert model == "qwen2.5-coder:7b"
+
+
+class TestRelay:
+    def test_relay_state_submits_job_to_polling_worker(self):
+        from cluster.network.relay import RelayState
+
+        state = RelayState()
+        state.register_worker({
+            "node_id": "worker-1",
+            "models": ["qwen2.5-coder:7b"],
+            "hardware": {},
+            "status": "idle",
+            "compute_score": 10,
+        })
+
+        result_holder = {}
+
+        def submit():
+            result_holder["result"] = state.submit_job(
+                "worker-1",
+                "/api/generate",
+                b'{"model":"qwen2.5-coder:7b","prompt":"Hello","stream":false}',
+                {},
+                timeout=2,
+            )
+
+        import threading
+        thread = threading.Thread(target=submit)
+        thread.start()
+
+        job = state.poll_job("worker-1", timeout=1)
+        assert job["path"] == "/api/generate"
+        state.store_result({
+            "job_id": job["job_id"],
+            "node_id": "worker-1",
+            "ok": True,
+            "status": 200,
+            "body": '{"response":"Hello"}',
+        })
+        thread.join(timeout=2)
+
+        assert result_holder["result"]["ok"] is True
+        assert result_holder["result"]["body"] == '{"response":"Hello"}'
 
 
 if __name__ == "__main__":
